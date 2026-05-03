@@ -11,19 +11,18 @@ import (
 	mDNS "github.com/miekg/dns"
 )
 
-// Exchange provides a cgo-free fallback for darwin builds. It mirrors
-// local.go's Exchange path: hosts file lookup first, DHCP fallback if TUN
-// is inbound, then generic DNS exchange via the dialer (using
-// /etc/resolv.conf servers parsed by local_shared.go).
-func (t *Transport) Exchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
+// systemExchange provides a cgo-free fallback for darwin builds.
+// In !cgo mode we cannot call Apple's resolver APIs, so we fallback to
+// the generic exchange path using parsed system resolvers.
+func (t *Transport) systemExchange(ctx context.Context, message *mDNS.Msg) (*mDNS.Msg, error) {
 	question := message.Question[0]
-	if question.Qtype == mDNS.TypeA || question.Qtype == mDNS.TypeAAAA {
+	if t.hosts != nil && (question.Qtype == mDNS.TypeA || question.Qtype == mDNS.TypeAAAA) {
 		addresses := t.hosts.Lookup(dns.FqdnToDomain(question.Name))
 		if len(addresses) > 0 {
 			return dns.FixedResponse(message.Id, question, addresses, C.DefaultDNSTTL), nil
 		}
 	}
-	if t.fallback && t.dhcpTransport != nil {
+	if t.dhcpTransport != nil {
 		dhcpServers := t.dhcpTransport.Fetch()
 		if len(dhcpServers) > 0 {
 			return t.dhcpTransport.Exchange0(ctx, message, dhcpServers)
