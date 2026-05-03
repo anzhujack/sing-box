@@ -259,8 +259,21 @@ func (r *Router) RuleSet(tag string) (adapter.RuleSet, bool) {
 	return ruleSet, loaded
 }
 
+func (r *Router) RuleSets() []adapter.RuleSet {
+	return r.ruleSets
+}
+
 func (r *Router) Rules() []adapter.Rule {
 	return r.rules
+}
+
+func (r *Router) Rule(uuid string) (adapter.Rule, bool) {
+	for _, rule := range r.rules {
+		if rule.UUID() == uuid {
+			return rule, true
+		}
+	}
+	return nil, false
 }
 
 func (r *Router) AppendTracker(tracker adapter.ConnectionTracker) {
@@ -283,4 +296,12 @@ func (r *Router) ResetNetwork() {
 	r.network.ResetNetwork()
 	r.httpClientManager.ResetNetwork()
 	r.dns.ResetNetwork()
+}
+
+func (r *Router) DefaultDomainMatchStrategy() C.DomainMatchStrategy {
+	return C.DomainStrategyAsIS
+}
+
+func (r *Router) Reload() {
+	// Placeholder for reload functionality
 }

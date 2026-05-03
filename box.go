@@ -235,7 +235,7 @@ func New(options Options) (*Box, error) {
 	httpClientManager := httpclient.NewManager(ctx, logFactory.NewLogger("httpclient"), options.HTTPClients, routeOptions.DefaultHTTPClient)
 	service.MustRegister[adapter.HTTPClientManager](ctx, httpClientManager)
 	httpClientService := adapter.LifecycleService(httpClientManager)
-	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions, reloadChan)
+	router := route.NewRouter(ctx, logFactory, routeOptions, dnsOptions)
 	service.MustRegister[adapter.Router](ctx, router)
 	err = router.Initialize(routeOptions.Rules, routeOptions.RuleSet)
 	if err != nil {

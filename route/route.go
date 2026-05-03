@@ -12,10 +12,10 @@ import (
 	"github.com/sagernet/sing-box/common/sniff"
 	C "github.com/sagernet/sing-box/constant"
 	R "github.com/sagernet/sing-box/route/rule"
-	"github.com/sagernet/sing-mux"
-	"github.com/sagernet/sing-tun"
+	mux "github.com/sagernet/sing-mux"
+	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/ping"
-	"github.com/sagernet/sing-vmess"
+	vmess "github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -636,13 +636,6 @@ func (r *Router) actionSniff(
 		metadata.SnifferNames = action.SnifferNames
 		metadata.SniffError = err
 		if err == nil {
-			//goland:noinspection GoDeprecation
-			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
-				metadata.Destination = M.Socksaddr{
-					Fqdn: metadata.Domain,
-					Port: metadata.Destination.Port,
-				}
-			}
 			if metadata.Domain != "" && metadata.Client != "" {
 				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
 			} else if metadata.Domain != "" {
@@ -768,13 +761,6 @@ func (r *Router) actionSniff(
 		}
 	finally:
 		if err == nil {
-			//goland:noinspection GoDeprecation
-			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
-				metadata.Destination = M.Socksaddr{
-					Fqdn: metadata.Domain,
-					Port: metadata.Destination.Port,
-				}
-			}
 			if metadata.Domain != "" && metadata.Client != "" {
 				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
 			} else if metadata.Domain != "" {
