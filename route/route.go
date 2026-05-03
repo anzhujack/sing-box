@@ -12,10 +12,10 @@ import (
 	"github.com/sagernet/sing-box/common/sniff"
 	C "github.com/sagernet/sing-box/constant"
 	R "github.com/sagernet/sing-box/route/rule"
-	mux "github.com/sagernet/sing-mux"
-	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-mux"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/ping"
-	vmess "github.com/sagernet/sing-vmess"
+	"github.com/sagernet/sing-vmess"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
@@ -88,6 +88,10 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	case uot.LegacyMagicAddress:
 		return E.New("global UoT (legacy) not supported since sing-box v1.7.0.")
 	}
+	if metadata.InboundType == C.TypeTun && metadata.Protocol == C.ProtocolDNS {
+		N.CloseOnHandshakeFailure(conn, onClose, r.hijackDNSStream(ctx, conn, metadata))
+		return nil
+	}
 	if deadline.NeedAdditionalReadDeadline(conn) {
 		conn = deadline.NewConn(conn)
 	}
@@ -149,7 +153,6 @@ func (r *Router) routeConnection(ctx context.Context, conn net.Conn, metadata ad
 	for _, buffer := range buffers {
 		conn = bufio.NewCachedConn(conn, buffer)
 	}
-	metadata.InitExtended()
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
@@ -220,6 +223,9 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 	/*if deadline.NeedAdditionalReadDeadline(conn) {
 		conn = deadline.NewPacketConn(bufio.NewNetPacketConn(conn))
 	}*/
+	if metadata.InboundType == C.TypeTun && metadata.Protocol == C.ProtocolDNS {
+		return r.hijackDNSPacket(ctx, conn, nil, metadata, onClose)
+	}
 	selectedRule, _, _, packetBuffers, err := r.matchRule(ctx, &metadata, false, false, nil, conn)
 	if err != nil {
 		return err
@@ -275,11 +281,10 @@ func (r *Router) routePacketConnection(ctx context.Context, conn N.PacketConn, m
 		conn = bufio.NewCachedPacketConn(conn, buffer.Buffer, buffer.Destination)
 		N.PutPacketBuffer(buffer)
 	}
-	metadata.InitExtended()
 	for _, tracker := range r.trackers {
 		conn = tracker.RoutedPacketConnection(ctx, conn, metadata, selectedRule, selectedOutbound)
 	}
-	if metadata.FakeIP || metadata.DestOverride {
+	if metadata.FakeIP {
 		conn = bufio.NewNATPacketConn(bufio.NewNetPacketConn(conn), metadata.OriginDestination, metadata.Destination)
 	}
 	if outboundHandler, isHandler := selectedOutbound.(adapter.PacketConnectionHandler); isHandler {
@@ -456,9 +461,6 @@ func (r *Router) matchRule(
 
 match:
 	for currentRuleIndex, currentRule := range r.rules {
-		if currentRule.Disabled() {
-			continue
-		}
 		metadata.ResetRuleCache()
 		if !currentRule.Match(metadata) {
 			continue
@@ -484,17 +486,13 @@ match:
 		var routeOptions *R.RuleActionRouteOptions
 		switch action := currentRule.Action().(type) {
 		case *R.RuleActionRoute:
-			if selectedOutbound, loaded := r.outbound.Outbound(action.Outbound); loaded {
-				if selectedOutbound.Type() == C.TypeSelector {
-					selectedOutbound = selectedOutbound.(adapter.SelectorGroup).Selected()
-				}
-				if selectedOutbound.Type() == C.TypePass {
-					continue
-				}
-			}
 			routeOptions = &action.RuleActionRouteOptions
 		case *R.RuleActionRouteOptions:
 			routeOptions = action
+		case *R.RuleActionBypass:
+			if action.Outbound != "" {
+				routeOptions = &action.RuleActionRouteOptions
+			}
 		}
 		if routeOptions != nil {
 			// TODO: add nat
@@ -544,6 +542,10 @@ match:
 			if routeOptions.TLSRecordFragment {
 				metadata.TLSRecordFragment = true
 			}
+			if routeOptions.TLSSpoof != "" {
+				metadata.TLSSpoof = routeOptions.TLSSpoof
+				metadata.TLSSpoofMethod = routeOptions.TLSSpoofMethod
+			}
 		}
 		switch action := currentRule.Action().(type) {
 		case *R.RuleActionSniff:
@@ -562,10 +564,6 @@ match:
 				selectedRule = currentRule
 				selectedRuleIndex = currentRuleIndex
 				break match
-			}
-		case *R.RuleActionSniffOverrideDestination:
-			if metadata.SniffHost != "" {
-				r.actionSniffOverrideDestination(ctx, metadata, inputConn, inputPacketConn)
 			}
 		case *R.RuleActionResolve:
 			fatalErr = r.actionResolve(ctx, metadata, action)
@@ -635,16 +633,20 @@ func (r *Router) actionSniff(
 			action.Timeout,
 			streamSniffers...,
 		)
-		// 仅在 slice 真实变化时改写 SnifferNames，避免 header 拷贝污染缓存
-		if !slices.Equal(metadata.SnifferNames, action.SnifferNames) {
-			metadata.SnifferNames = action.SnifferNames
-		}
+		metadata.SnifferNames = action.SnifferNames
 		metadata.SniffError = err
 		if err == nil {
-			if metadata.SniffHost != "" && metadata.Client != "" {
-				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol, ", domain: ", metadata.SniffHost, ", client: ", metadata.Client)
-			} else if metadata.SniffHost != "" {
-				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol, ", domain: ", metadata.SniffHost)
+			//goland:noinspection GoDeprecation
+			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
+				metadata.Destination = M.Socksaddr{
+					Fqdn: metadata.Domain,
+					Port: metadata.Destination.Port,
+				}
+			}
+			if metadata.Domain != "" && metadata.Client != "" {
+				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
+			} else if metadata.Domain != "" {
+				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol, ", domain: ", metadata.Domain)
 			} else {
 				r.logger.DebugContext(ctx, "sniffed protocol: ", metadata.Protocol)
 			}
@@ -660,13 +662,6 @@ func (r *Router) actionSniff(
 		} else if slices.Equal(metadata.SnifferNames, action.SnifferNames) && metadata.SniffError != nil && !errors.Is(metadata.SniffError, sniff.ErrNeedMoreData) {
 			r.logger.DebugContext(ctx, "packet sniff skipped due to previous error: ", metadata.SniffError)
 			return
-		}
-		// 一次性同步 SnifferNames，使后续两个循环内仅需更新 SniffError，
-		// 避免千次级分片循环中重复执行 slice header 拷贝。
-		// quicMoreData 闭包依赖的 slices.Equal 语义与原实现一致：
-		// 同步后相等性不变，只依赖 SniffError 是否为 ErrNeedMoreData。
-		if !slices.Equal(metadata.SnifferNames, action.SnifferNames) {
-			metadata.SnifferNames = action.SnifferNames
 		}
 		quicMoreData := func() bool {
 			return slices.Equal(metadata.SnifferNames, action.SnifferNames) && errors.Is(metadata.SniffError, sniff.ErrNeedMoreData)
@@ -701,7 +696,7 @@ func (r *Router) actionSniff(
 					packetSniffers...,
 				)
 			}
-			// SnifferNames 已在循环外同步，此处仅需更新 SniffError
+			metadata.SnifferNames = action.SnifferNames
 			metadata.SniffError = err
 			if errors.Is(err, sniff.ErrNeedMoreData) {
 				// TODO: replace with generic message when there are more multi-packet protocols
@@ -761,7 +756,7 @@ func (r *Router) actionSniff(
 					Destination: destination,
 				}
 				packetBuffers = append(packetBuffers, packetBuffer)
-				// SnifferNames 已在循环外同步，此处仅需更新 SniffError
+				metadata.SnifferNames = action.SnifferNames
 				metadata.SniffError = err
 				if errors.Is(err, sniff.ErrNeedMoreData) {
 					// TODO: replace with generic message when there are more multi-packet protocols
@@ -773,10 +768,17 @@ func (r *Router) actionSniff(
 		}
 	finally:
 		if err == nil {
-			if metadata.SniffHost != "" && metadata.Client != "" {
-				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.SniffHost, ", client: ", metadata.Client)
-			} else if metadata.SniffHost != "" {
-				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.SniffHost)
+			//goland:noinspection GoDeprecation
+			if action.OverrideDestination && M.IsDomainName(metadata.Domain) {
+				metadata.Destination = M.Socksaddr{
+					Fqdn: metadata.Domain,
+					Port: metadata.Destination.Port,
+				}
+			}
+			if metadata.Domain != "" && metadata.Client != "" {
+				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.Domain, ", client: ", metadata.Client)
+			} else if metadata.Domain != "" {
+				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", domain: ", metadata.Domain)
 			} else if metadata.Client != "" {
 				r.logger.DebugContext(ctx, "sniffed packet protocol: ", metadata.Protocol, ", client: ", metadata.Client)
 			} else {
@@ -785,28 +787,6 @@ func (r *Router) actionSniff(
 		}
 	}
 	return
-}
-
-func (r *Router) actionSniffOverrideDestination(ctx context.Context, metadata *adapter.InboundContext, inputConn net.Conn, inputPacketConn N.PacketConn) {
-	if inputConn != nil {
-		if !metadata.Destination.IsDomain() && M.IsDomainName(metadata.SniffHost) {
-			metadata.Destination = M.Socksaddr{
-				Fqdn: metadata.SniffHost,
-				Port: metadata.Destination.Port,
-			}
-			r.logger.DebugContext(ctx, "connection destination is overridden as ", metadata.SniffHost, ":", metadata.Destination.Port)
-		}
-	} else if inputPacketConn != nil {
-		if !metadata.Destination.IsDomain() && M.IsDomainName(metadata.SniffHost) {
-			metadata.OriginDestination = metadata.Destination
-			metadata.Destination = M.Socksaddr{
-				Fqdn: metadata.SniffHost,
-				Port: metadata.Destination.Port,
-			}
-			metadata.DestOverride = true
-			r.logger.DebugContext(ctx, "packet connection destination is overridden as ", metadata.SniffHost, ":", metadata.Destination.Port)
-		}
-	}
 }
 
 func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundContext, action *R.RuleActionResolve) error {
@@ -831,43 +811,8 @@ func (r *Router) actionResolve(ctx context.Context, metadata *adapter.InboundCon
 		if err != nil {
 			return err
 		}
-		if action.MatchOnly {
-			metadata.CacheIPs = addresses
-			r.logger.DebugContext(ctx, "resolved [", strings.Join(F.MapToString(metadata.CacheIPs), " "), "] for match only")
-		} else {
-			metadata.DestinationAddresses = addresses
-			r.logger.DebugContext(ctx, "resolved [", strings.Join(F.MapToString(metadata.DestinationAddresses), " "), "]")
-		}
-		if len(addresses) > 0 {
-			if isAllIPv4(addresses) {
-				metadata.IPVersion = 4
-			} else if isAllIPv6(addresses) {
-				metadata.IPVersion = 6
-			}
-		}
+		metadata.DestinationAddresses = addresses
+		r.logger.DebugContext(ctx, "resolved [", strings.Join(F.MapToString(metadata.DestinationAddresses), " "), "]")
 	}
 	return nil
-}
-
-func isAllIPv4(addresses []netip.Addr) bool {
-	for _, addr := range addresses {
-		if !addr.Is4() {
-			return false
-		}
-	}
-	return true
-}
-
-func isAllIPv6(addresses []netip.Addr) bool {
-	for _, addr := range addresses {
-		if !addr.Is6() {
-			return false
-		}
-	}
-	return true
-}
-
-func (r *Router) Rule(uuid string) (adapter.Rule, bool) {
-	rule, exists := r.ruleByUUID[uuid]
-	return rule, exists
 }

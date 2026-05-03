@@ -13,7 +13,8 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
-	tf "github.com/sagernet/sing-box/common/tlsfragment"
+	"github.com/sagernet/sing-box/common/tlsfragment"
+	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
@@ -27,27 +28,6 @@ import (
 )
 
 var _ adapter.ConnectionManager = (*ConnectionManager)(nil)
-
-// joinDestinationAddresses 将目的地址切片格式化为 "[a,b,c]" 形式。
-// 相比 strings.Join(common.Map(addrs, netip.Addr.String), ",") 省去一次
-// 中间 []string 分配 + strings.Join 内部拼接缓冲，错误路径分配量显著降低。
-func joinDestinationAddresses(addrs []netip.Addr) string {
-	if len(addrs) == 0 {
-		return "[]"
-	}
-	var sb strings.Builder
-	// IPv4 ~15 字符、IPv6 ~40 字符，平均 20 足够，再加 "[]" 与分隔符
-	sb.Grow(len(addrs)*22 + 2)
-	sb.WriteByte('[')
-	for i, a := range addrs {
-		if i > 0 {
-			sb.WriteByte(',')
-		}
-		sb.WriteString(a.String())
-	}
-	sb.WriteByte(']')
-	return sb.String()
-}
 
 type ConnectionManager struct {
 	logger      logger.ContextLogger
@@ -69,22 +49,6 @@ func (m *ConnectionManager) Count() int {
 	return m.connections.Len()
 }
 
-// CloseAll evicts every tracked connection and asks each to Close
-// asynchronously. Callers no longer block on the per-conn close
-// cost — critical on a network switch where N × Close() recurses
-// into Smart.recordStats + bbolt writes + QUIC session teardown,
-// serialised under this function's scope. For a busy config that
-// can mean thousands of close()s in a tight loop, pegging CPU and
-// holding the caller (ResetNetwork) for seconds.
-//
-// Semantics preserved: we still remove every tracked entry under
-// the list lock before returning (so a subsequent TrackConn
-// observes the list as empty). What changes is that the actual
-// Close() of each evicted closer happens on a separate goroutine.
-// If the caller needs synchronous completion, that contract was
-// never advertised — Close() can take arbitrary time per conn,
-// and no existing caller inspects post-return state beyond the
-// fact that the tracker emptied.
 func (m *ConnectionManager) CloseAll() {
 	m.access.Lock()
 	var closers []io.Closer
@@ -95,18 +59,9 @@ func (m *ConnectionManager) CloseAll() {
 		element = nextElement
 	}
 	m.access.Unlock()
-	if len(closers) == 0 {
-		return
+	for _, closer := range closers {
+		common.Close(closer)
 	}
-	// Fire-and-forget: one dedicated goroutine serialises the
-	// closes (preserves original per-close ordering) so we don't
-	// spawn N goroutines for N conns under a network-switch
-	// storm. The caller returns the moment the tracker is empty.
-	go func() {
-		for _, closer := range closers {
-			common.Close(closer)
-		}
-	}()
 }
 
 func (m *ConnectionManager) Close() error {
@@ -150,16 +105,13 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 	if err != nil {
 		var remoteString string
 		if len(metadata.DestinationAddresses) > 0 {
-			remoteString = joinDestinationAddresses(metadata.DestinationAddresses)
+			remoteString = "[" + strings.Join(common.Map(metadata.DestinationAddresses, netip.Addr.String), ",") + "]"
 		} else {
 			remoteString = metadata.Destination.String()
 		}
 		var dialerString string
 		if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-			if outbound.Type() == C.TypeLoadBalance {
-				dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
-			}
 		}
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -176,6 +128,17 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 	}
 	if metadata.TLSFragment || metadata.TLSRecordFragment {
 		remoteConn = tf.NewConn(remoteConn, ctx, metadata.TLSFragment, metadata.TLSRecordFragment, metadata.TLSFragmentFallbackDelay)
+	}
+	if metadata.TLSSpoof != "" {
+		spoofConn, spoofErr := tlsspoof.NewConn(remoteConn, metadata.TLSSpoofMethod, metadata.TLSSpoof)
+		if spoofErr != nil {
+			spoofErr = E.Cause(spoofErr, "tls_spoof setup")
+			remoteConn.Close()
+			N.CloseOnHandshakeFailure(conn, onClose, spoofErr)
+			m.logger.ErrorContext(ctx, spoofErr)
+			return
+		}
+		remoteConn = spoofConn
 	}
 	var done atomic.Bool
 	if m.kickWriteHandshake(ctx, conn, remoteConn, false, &done, onClose) {
@@ -216,16 +179,13 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 		if err != nil {
 			var remoteString string
 			if len(metadata.DestinationAddresses) > 0 {
-				remoteString = joinDestinationAddresses(metadata.DestinationAddresses)
+				remoteString = "[" + strings.Join(common.Map(metadata.DestinationAddresses, netip.Addr.String), ",") + "]"
 			} else {
 				remoteString = metadata.Destination.String()
 			}
 			var dialerString string
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-				if outbound.Type() == C.TypeLoadBalance {
-					dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
-				}
 			}
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -249,9 +209,6 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			var dialerString string
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-				if outbound.Type() == C.TypeLoadBalance {
-					dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
-				}
 			}
 			err = E.Cause(err, "listen packet connection using ", dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -456,26 +413,6 @@ type trackedPacketConn struct {
 	net.PacketConn
 	manager *ConnectionManager
 	element *list.Element[io.Closer]
-}
-
-func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
-	if packetReader, ok := c.PacketConn.(N.PacketReader); ok {
-		return packetReader.ReadPacket(buffer)
-	}
-	_, addr, err := buffer.ReadPacketFrom(c.PacketConn)
-	if err != nil {
-		return M.Socksaddr{}, err
-	}
-	return M.SocksaddrFromNet(addr).Unwrap(), err
-}
-
-func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	if packetWriter, ok := c.PacketConn.(N.PacketWriter); ok {
-		return packetWriter.WritePacket(buffer, destination)
-	}
-	defer buffer.Release()
-	_, err := c.PacketConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
-	return err
 }
 
 func (c *trackedPacketConn) Close() error {

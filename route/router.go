@@ -35,7 +35,6 @@ type Router struct {
 	network           adapter.NetworkManager
 	httpClientManager adapter.HTTPClientManager
 	rules             []adapter.Rule
-	ruleByUUID        map[string]adapter.Rule
 	needFindProcess   bool
 	needFindNeighbor  bool
 	leaseFiles        []string
@@ -48,12 +47,9 @@ type Router struct {
 	trackers          []adapter.ConnectionTracker
 	platformInterface adapter.PlatformInterface
 	started           bool
-
-	defaultDomainMatchStrategy C.DomainMatchStrategy
-	reloadChan                 chan<- struct{}
 }
 
-func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions, reloadChan chan<- struct{}) *Router {
+func NewRouter(ctx context.Context, logFactory log.Factory, options option.RouteOptions, dnsOptions option.DNSOptions) *Router {
 	return &Router{
 		ctx:               ctx,
 		logger:            logFactory.NewLogger("router"),
@@ -65,23 +61,16 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.Route
 		network:           service.FromContext[adapter.NetworkManager](ctx),
 		httpClientManager: service.FromContext[adapter.HTTPClientManager](ctx),
 		rules:             make([]adapter.Rule, 0, len(options.Rules)),
-		ruleByUUID:        make(map[string]adapter.Rule),
 		ruleSetMap:        make(map[string]adapter.RuleSet),
 		needFindProcess:   hasRule(options.Rules, isProcessRule) || hasDNSRule(dnsOptions.Rules, isProcessDNSRule) || options.FindProcess,
-		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || options.FindNeighbor,
+		needFindNeighbor:  hasRule(options.Rules, isNeighborRule) || hasDNSRule(dnsOptions.Rules, isNeighborDNSRule) || hasLocalNeighborDNSServer(dnsOptions.Servers) || options.FindNeighbor,
 		leaseFiles:        options.DHCPLeaseFiles,
 		pauseManager:      service.FromContext[pause.Manager](ctx),
 		platformInterface: service.FromContext[adapter.PlatformInterface](ctx),
-
-		defaultDomainMatchStrategy: C.DomainMatchStrategy(options.DefaultDomainMatchStrategy),
-		reloadChan:                 reloadChan,
 	}
 }
 
 func (r *Router) Initialize(rules []option.Rule, ruleSets []option.RuleSet) error {
-	if r.defaultDomainMatchStrategy == C.DomainMatchStrategyFQDNOnly || r.defaultDomainMatchStrategy == C.DomainMatchStrategySniffHostOnly {
-		return E.New("default_domain_match_strategy cannot be fqdn_only or sniffhost_only")
-	}
 	for i, options := range rules {
 		err := R.ValidateNoNestedRuleActions(options)
 		if err != nil {
@@ -91,9 +80,7 @@ func (r *Router) Initialize(rules []option.Rule, ruleSets []option.RuleSet) erro
 		if err != nil {
 			return E.Cause(err, "parse rule[", i, "]")
 		}
-		uuid := rule.UUID()
 		r.rules = append(r.rules, rule)
-		r.ruleByUUID[uuid] = rule
 	}
 	for i, options := range ruleSets {
 		if _, exists := r.ruleSetMap[options.Tag]; exists {
@@ -112,6 +99,36 @@ func (r *Router) Initialize(rules []option.Rule, ruleSets []option.RuleSet) erro
 func (r *Router) Start(stage adapter.StartStage) error {
 	monitor := taskmonitor.New(r.logger, C.StartTimeout)
 	switch stage {
+	case adapter.StartStateInitialize:
+		if r.needFindNeighbor {
+			if r.platformInterface != nil && r.platformInterface.UsePlatformNeighborResolver() {
+				monitor.Start("initialize neighbor resolver")
+				resolver := newPlatformNeighborResolver(r.logger, r.platformInterface)
+				err := resolver.Start()
+				monitor.Finish()
+				if err != nil {
+					r.logger.Error(E.Cause(err, "start neighbor resolver"))
+				} else {
+					r.neighborResolver = resolver
+				}
+			} else {
+				monitor.Start("initialize neighbor resolver")
+				resolver, err := newNeighborResolver(r.logger, r.leaseFiles)
+				monitor.Finish()
+				if err != nil {
+					if err != os.ErrInvalid {
+						r.logger.Error(E.Cause(err, "create neighbor resolver"))
+					}
+				} else {
+					err = resolver.Start()
+					if err != nil {
+						r.logger.Error(E.Cause(err, "start neighbor resolver"))
+					} else {
+						r.neighborResolver = resolver
+					}
+				}
+			}
+		}
 	case adapter.StartStateStart:
 		var startContext *adapter.HTTPStartContext
 		if len(r.ruleSets) > 0 {
@@ -140,9 +157,7 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			startContext.Close()
 		}
 		r.network.Initialize(r.ruleSets)
-		r.network.RegisterNetworkResetCallback(r.dns.ResetNetwork)
 		needFindProcess := r.needFindProcess
-		needFindNeighbor := r.needFindNeighbor
 		for _, ruleSet := range r.ruleSets {
 			metadata := ruleSet.Metadata()
 			if metadata.ContainsProcessRule {
@@ -176,44 +191,6 @@ func (r *Router) Start(stage adapter.StartStage) error {
 			processCache := common.Must1(freelru.NewSharded[processCacheKey, processCacheEntry](256, maphash.NewHasher[processCacheKey]().Hash32))
 			processCache.SetLifetime(200 * time.Millisecond)
 			r.processCache = processCache
-		}
-		r.needFindNeighbor = needFindNeighbor
-		if needFindNeighbor {
-			if r.platformInterface != nil && r.platformInterface.UsePlatformNeighborResolver() {
-				monitor.Start("initialize neighbor resolver")
-				resolver := newPlatformNeighborResolver(r.logger, r.platformInterface)
-				err := resolver.Start()
-				monitor.Finish()
-				if err != nil {
-					r.logger.Error(E.Cause(err, "start neighbor resolver"))
-				} else {
-					r.neighborResolver = resolver
-				}
-			}
-			// Native lease-file-backed resolver as a fallback —
-			// upstream 11783aa54 added the nil-check so macOS falls
-			// through when the platform binding isn't available.
-			// The "else" pre-existing in HEAD was narrower (only ran
-			// when UsePlatformNeighborResolver=false); merging gives
-			// us double-protection: platform-first, else-or-failed
-			// path tries the native resolver.
-			if r.neighborResolver == nil {
-				monitor.Start("initialize neighbor resolver")
-				resolver, err := newNeighborResolver(r.logger, r.leaseFiles)
-				monitor.Finish()
-				if err != nil {
-					if err != os.ErrInvalid {
-						r.logger.Error(E.Cause(err, "create neighbor resolver"))
-					}
-				} else {
-					err = resolver.Start()
-					if err != nil {
-						r.logger.Error(E.Cause(err, "start neighbor resolver"))
-					} else {
-						r.neighborResolver = resolver
-					}
-				}
-			}
 		}
 	case adapter.StartStatePostStart:
 		for i, rule := range r.rules {
@@ -277,10 +254,6 @@ func (r *Router) Close() error {
 	return err
 }
 
-func (r *Router) RuleSets() []adapter.RuleSet {
-	return r.ruleSets
-}
-
 func (r *Router) RuleSet(tag string) (adapter.RuleSet, bool) {
 	ruleSet, loaded := r.ruleSetMap[tag]
 	return ruleSet, loaded
@@ -310,17 +283,4 @@ func (r *Router) ResetNetwork() {
 	r.network.ResetNetwork()
 	r.httpClientManager.ResetNetwork()
 	r.dns.ResetNetwork()
-}
-
-func (r *Router) DefaultDomainMatchStrategy() C.DomainMatchStrategy {
-	return r.defaultDomainMatchStrategy
-}
-
-func (r *Router) Reload() {
-	if r.platformInterface == nil {
-		select {
-		case r.reloadChan <- struct{}{}:
-		default:
-		}
-	}
 }

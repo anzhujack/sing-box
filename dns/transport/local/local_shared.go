@@ -1,5 +1,3 @@
-//go:build !darwin || (darwin && !cgo)
-
 package local
 
 import (
