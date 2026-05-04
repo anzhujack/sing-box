@@ -3,6 +3,8 @@ package clashapi
 import (
 	"context"
 	"net/http"
+	"net/netip"
+	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	C "github.com/sagernet/sing-box/constant"
@@ -15,12 +17,12 @@ import (
 
 func dnsRouter(router adapter.DNSRouter, statsManager *DNSStatsManager) http.Handler {
 	r := chi.NewRouter()
-	r.Get("/query", queryDNS(router))
+	r.Get("/query", queryDNS(router, statsManager))
 	r.Mount("/stats", dnsStatsRouter(statsManager))
 	return r
 }
 
-func queryDNS(router adapter.DNSRouter) func(w http.ResponseWriter, r *http.Request) {
+func queryDNS(router adapter.DNSRouter, statsManager *DNSStatsManager) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		qTypeStr := r.URL.Query().Get("type")
@@ -40,11 +42,23 @@ func queryDNS(router adapter.DNSRouter) func(w http.ResponseWriter, r *http.Requ
 
 		msg := dns.Msg{}
 		msg.SetQuestion(dns.Fqdn(name), qType)
+		start := time.Now()
 		resp, err := router.Exchange(ctx, &msg, adapter.DNSQueryOptions{})
+		latency := time.Since(start).Milliseconds()
+		clientIP := ""
+		if addrPort, splitErr := netip.ParseAddrPort(r.RemoteAddr); splitErr == nil {
+			clientIP = addrPort.Addr().String()
+		}
 		if err != nil {
+			if statsManager != nil {
+				statsManager.Record(name, qType, dns.RcodeServerFailure, "internal", latency, clientIP)
+			}
 			render.Status(r, http.StatusInternalServerError)
 			render.JSON(w, r, newError(err.Error()))
 			return
+		}
+		if statsManager != nil {
+			statsManager.Record(name, qType, resp.Rcode, "internal", latency, clientIP)
 		}
 
 		responseData := render.M{

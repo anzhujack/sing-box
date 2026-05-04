@@ -3,6 +3,7 @@ package clashapi
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/render"
@@ -26,8 +27,8 @@ func (m *DNSStatsManager) Record(domain string, qType uint16, rcode int, transpo
 	if m.aggregator == nil {
 		return
 	}
-	// latency 单位为毫秒，转换为 Duration
-	m.aggregator.Record(domain, qType, rcode, transport, 0, clientIP)
+	// latency 参数单位是毫秒
+	m.aggregator.Record(domain, qType, rcode, transport, time.Duration(latency)*time.Millisecond, clientIP)
 }
 
 // dnsStatsRouter 创建 DNS 统计路由
