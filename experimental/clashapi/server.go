@@ -43,18 +43,19 @@ func init() {
 var _ adapter.ClashServer = (*Server)(nil)
 
 type Server struct {
-	ctx            context.Context
-	router         adapter.Router
-	dnsRouter      adapter.DNSRouter
-	outbound       adapter.OutboundManager
-	provider       adapter.ProviderManager
-	endpoint       adapter.EndpointManager
-	logger         log.Logger
-	httpServer     *http.Server
-	trafficManager *trafficontrol.Manager
-	urlTestHistory adapter.URLTestHistoryStorage
-	logDebug       bool
-	cleaner        *cleanup.Cleaner
+	ctx             context.Context
+	router          adapter.Router
+	dnsRouter       adapter.DNSRouter
+	outbound        adapter.OutboundManager
+	provider        adapter.ProviderManager
+	endpoint        adapter.EndpointManager
+	logger          log.Logger
+	httpServer      *http.Server
+	trafficManager  *trafficontrol.Manager
+	urlTestHistory  adapter.URLTestHistoryStorage
+	logDebug        bool
+	cleaner         *cleanup.Cleaner
+	dnsStatsManager *DNSStatsManager
 
 	mode           string
 	modeList       []string
@@ -82,6 +83,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 	if updateInterval > 0 && updateInterval < time.Hour {
 		updateInterval = time.Hour
 	}
+	dnsStatsManager := NewDNSStatsManager()
 	s := &Server{
 		ctx:       ctx,
 		router:    service.FromContext[adapter.Router](ctx),
@@ -97,6 +99,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		trafficManager:           trafficManager,
 		logDebug:                 logFactory.Level() >= log.LevelDebug,
 		modeList:                 options.ModeList,
+		dnsStatsManager:          dnsStatsManager,
 		externalController:       options.ExternalController != "",
 		externalUIDownloadURL:    options.ExternalUIDownloadURL,
 		externalUIHTTPClient:     options.ExternalUIHTTPClient,
@@ -149,7 +152,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Mount("/script", scriptRouter())
 		r.Mount("/profile", profileRouter())
 		r.Mount("/cache", cacheRouter(ctx))
-		r.Mount("/dns", dnsRouter(s.dnsRouter))
+		r.Mount("/dns", dnsRouter(s.dnsRouter, dnsStatsManager))
 		r.Mount("/smart", smartRouter(ctx))
 
 		if service.FromContext[adapter.PlatformInterface](ctx) == nil {

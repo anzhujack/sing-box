@@ -13,9 +13,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-func dnsRouter(router adapter.DNSRouter) http.Handler {
+func dnsRouter(router adapter.DNSRouter, statsManager *DNSStatsManager) http.Handler {
 	r := chi.NewRouter()
 	r.Get("/query", queryDNS(router))
+	r.Mount("/stats", dnsStatsRouter(statsManager))
 	return r
 }
 
