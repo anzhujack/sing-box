@@ -62,6 +62,7 @@ func getQueries(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *ht
 			return
 		}
 		limit := 100
+		sinceSeconds := int64(0)
 		if l := r.URL.Query().Get("limit"); l != "" {
 			if err := parseIntParam(l, &limit); err != nil {
 				render.Status(r, http.StatusBadRequest)
@@ -69,7 +70,17 @@ func getQueries(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *ht
 				return
 			}
 		}
+		if since := r.URL.Query().Get("since"); since != "" {
+			if err := parseInt64Param(since, &sinceSeconds); err != nil {
+				render.Status(r, http.StatusBadRequest)
+				render.JSON(w, r, newError("invalid since"))
+				return
+			}
+		}
 		queries := statsManager.aggregator.GetStats()
+		if sinceSeconds > 0 {
+			queries = statsManager.aggregator.GetStatsSince(time.Now().Add(-time.Duration(sinceSeconds) * time.Second))
+		}
 		if len(queries) > limit {
 			queries = queries[:limit]
 		}
@@ -93,6 +104,15 @@ func clearStats(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *ht
 // parseIntParam 解析整数参数
 func parseIntParam(s string, dest *int) error {
 	val, err := strconv.Atoi(s)
+	if err != nil {
+		return err
+	}
+	*dest = val
+	return nil
+}
+
+func parseInt64Param(s string, dest *int64) error {
+	val, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return err
 	}

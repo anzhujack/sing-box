@@ -72,6 +72,7 @@ type Server struct {
 	lastEtag                 string
 	lastUpdated              time.Time
 	ticker                   *time.Ticker
+	dnsStatsCleanupTicker    *time.Ticker
 }
 
 func NewServer(ctx context.Context, logFactory log.ObservableFactory, options option.ClashAPIOptions) (adapter.ClashServer, error) {
@@ -193,6 +194,20 @@ func (s *Server) Start(stage adapter.StartStage) error {
 		}
 	case adapter.StartStateStarted:
 		if s.externalController {
+			if s.dnsStatsManager != nil {
+				s.dnsStatsCleanupTicker = time.NewTicker(12 * time.Hour)
+				go func() {
+					for {
+						select {
+						case <-s.ctx.Done():
+							return
+						case <-s.dnsStatsCleanupTicker.C:
+							s.dnsStatsManager.aggregator.Clear()
+							s.logger.Info("dns stats auto cleared")
+						}
+					}
+				}()
+			}
 			if s.externalUI != "" && s.externalUIUpdateInterval != 0 {
 				if s.cacheFile != nil {
 					if savedExternalUI := s.cacheFile.LoadExternalUI("ExternalUI"); savedExternalUI != nil {
@@ -252,6 +267,9 @@ func (s *Server) loopUpdate() {
 func (s *Server) Close() error {
 	if s.ticker != nil {
 		s.ticker.Stop()
+	}
+	if s.dnsStatsCleanupTicker != nil {
+		s.dnsStatsCleanupTicker.Stop()
 	}
 	return common.Close(
 		common.PtrOrNil(s.httpServer),

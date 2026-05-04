@@ -104,6 +104,21 @@ func (sa *StatsAggregator) GetStats() []QueryStats {
 	return result
 }
 
+// GetStatsSince 获取指定时间之后的统计（按时间倒序）
+func (sa *StatsAggregator) GetStatsSince(since time.Time) []QueryStats {
+	all := sa.GetStats()
+	if since.IsZero() {
+		return all
+	}
+	result := make([]QueryStats, 0, len(all))
+	for _, q := range all {
+		if q.Timestamp.After(since) || q.Timestamp.Equal(since) {
+			result = append(result, q)
+		}
+	}
+	return result
+}
+
 // Summary 统计摘要
 type Summary struct {
 	TotalQueries   int64            `json:"total_queries"`
