@@ -18,6 +18,25 @@ type QueryStats struct {
 	ClientIP  string    `json:"client_ip,omitempty"`
 }
 
+// QueryRecorder 用于接入外部统计写入（如 clashapi）
+type QueryRecorder interface {
+	Record(domain string, qType uint16, rcode int, transport string, latency int64, clientIP string)
+}
+
+var globalQueryRecorder QueryRecorder
+
+// SetQueryRecorder 设置全局 DNS 查询记录器
+func SetQueryRecorder(recorder QueryRecorder) {
+	globalQueryRecorder = recorder
+}
+
+func recordExternalQuery(domain string, qType uint16, rcode int, transport string, latency int64, clientIP string) {
+	if globalQueryRecorder == nil {
+		return
+	}
+	globalQueryRecorder.Record(domain, qType, rcode, transport, latency, clientIP)
+}
+
 // StatsAggregator DNS 查询统计聚合器（环形缓冲）
 type StatsAggregator struct {
 	mu      sync.RWMutex

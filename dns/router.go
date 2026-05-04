@@ -678,6 +678,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 	legacyDNSMode := r.legacyDNSMode
 	r.rulesAccess.RUnlock()
 	r.logger.DebugContext(ctx, "exchange ", FormatQuestion(message.Question[0].String()))
+	startTime := time.Now()
 	var (
 		response  *mDNS.Msg
 		transport adapter.DNSTransport
@@ -773,8 +774,17 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 		}
 	}
 done:
+	transportTag := ""
+	if transport != nil {
+		transportTag = transport.Tag()
+	}
+	latency := time.Since(startTime).Milliseconds()
 	if err != nil {
+		recordExternalQuery(metadata.Domain, metadata.QueryType, mDNS.RcodeServerFailure, transportTag, latency, "")
 		return nil, err
+	}
+	if response != nil {
+		recordExternalQuery(metadata.Domain, metadata.QueryType, response.Rcode, transportTag, latency, "")
 	}
 	if r.dnsReverseMapping != nil && len(message.Question) > 0 && response != nil && len(response.Answer) > 0 {
 		if transport == nil || transport.Type() != C.DNSTypeFakeIP {

@@ -16,6 +16,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	boxdns "github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/experimental"
 	"github.com/sagernet/sing-box/experimental/clashapi/trafficontrol"
 	"github.com/sagernet/sing-box/experimental/deprecated"
@@ -84,6 +85,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		updateInterval = time.Hour
 	}
 	dnsStatsManager := NewDNSStatsManager()
+	boxdns.SetQueryRecorder(dnsStatsManager)
 	s := &Server{
 		ctx:       ctx,
 		router:    service.FromContext[adapter.Router](ctx),
