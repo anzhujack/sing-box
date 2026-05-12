@@ -42,6 +42,7 @@ type Endpoint struct {
 	logger               logger.ContextLogger
 	localAddresses       []netip.Prefix
 	endpoint             *wireguard.Endpoint
+	started              atomic.Bool
 	innerDNSQueryOptions adapter.DNSQueryOptions
 }
 
@@ -124,7 +125,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		if err != nil {
 			return nil, E.Cause(err, "inner domain resolver")
 		}
-		ep.innerDNSQueryOptions = *innerDNSOpts
+		ep.innerDNSQueryOptions = innerDNSOpts
 	}
 	return ep, nil
 }

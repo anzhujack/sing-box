@@ -17,7 +17,6 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/buf"
-	"github.com/sagernet/sing/common/bufio/deadline"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	M "github.com/sagernet/sing/common/metadata"
@@ -154,20 +153,6 @@ func (t *TCPTransport) createNewConnection(ctx context.Context, message *mDNS.Ms
 	conn := newReuseableDNSConn(rawConn, t.logger, t.enablePipeline, 0, t.maxQueries, nil, t)
 	defer conn.Close()
 	return conn.Exchange(ctx, message)
-}
-
-func setConnDeadline(ctx context.Context, conn net.Conn, needClose bool) func() {
-	if needClose {
-		stop := context.AfterFunc(ctx, func() {
-			conn.Close()
-		})
-		return func() { stop() }
-	}
-	if d, ok := ctx.Deadline(); ok {
-		conn.SetDeadline(d)
-		return func() { conn.SetDeadline(time.Time{}) }
-	}
-	return func() {}
 }
 
 func ReadMessage(reader io.Reader) (*mDNS.Msg, error) {
