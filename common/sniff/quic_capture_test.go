@@ -158,8 +158,8 @@ func TestSniffQUICInitialFromQuicGo(t *testing.T) {
 				for i := 1; i < len(packets); i++ {
 					// Reuse same metadata to accumulate fragments
 					err = sniff.QUICClientHello(context.Background(), &metadata, packets[i])
-					t.Logf("Packet %d sniff result: err=%v, domain=%s, sniffCtx=%v", i, err, metadata.Domain, metadata.SniffContext != nil)
-					if metadata.Domain != "" || (err != nil && !errors.Is(err, sniff.ErrNeedMoreData)) {
+					t.Logf("Packet %d sniff result: err=%v, domain=%s, sniff_host=%s, sniffCtx=%v", i, err, metadata.Domain, metadata.SniffHost, metadata.SniffContext != nil)
+					if metadata.Domain != "" || metadata.SniffHost != "" || (err != nil && !errors.Is(err, sniff.ErrNeedMoreData)) {
 						break
 					}
 				}
@@ -169,13 +169,17 @@ func TestSniffQUICInitialFromQuicGo(t *testing.T) {
 			t.Logf("First packet hex:\n%s", hex.Dump(packets[0][:min(256, len(packets[0]))]))
 
 			// Log final results
-			t.Logf("Final: Protocol=%s, Domain=%s, Client=%s", metadata.Protocol, metadata.Domain, metadata.Client)
+			t.Logf("Final: Protocol=%s, Domain=%s, SniffHost=%s, Client=%s", metadata.Protocol, metadata.Domain, metadata.SniffHost, metadata.Client)
 
-			// Verify SNI extraction
-			if metadata.Domain == "" {
+			// Verify SNI extraction (new path may populate SniffHost instead of Domain)
+			host := metadata.Domain
+			if host == "" {
+				host = metadata.SniffHost
+			}
+			if host == "" {
 				t.Errorf("Failed to extract SNI, expected: %s", testSNI)
 			} else {
-				require.Equal(t, testSNI, metadata.Domain, "SNI should match")
+				require.Equal(t, testSNI, host, "SNI should match")
 			}
 
 			// Check client identification - quic-go should be identified as quic-go, not chromium
