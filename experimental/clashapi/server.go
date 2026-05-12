@@ -44,6 +44,7 @@ var _ adapter.ClashServer = (*Server)(nil)
 
 type Server struct {
 	ctx            context.Context
+	network        adapter.NetworkManager
 	router         adapter.Router
 	dnsRouter      adapter.DNSRouter
 	outbound       adapter.OutboundManager
@@ -84,6 +85,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 	}
 	s := &Server{
 		ctx:       ctx,
+		network:   service.FromContext[adapter.NetworkManager](ctx),
 		router:    service.FromContext[adapter.Router](ctx),
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
 		outbound:  service.FromContext[adapter.OutboundManager](ctx),
