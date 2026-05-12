@@ -89,6 +89,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 	boxdns.SetQueryRecorder(dnsStatsManager)
 	s := &Server{
 		ctx:       ctx,
+		network:   service.FromContext[adapter.NetworkManager](ctx),
 		router:    service.FromContext[adapter.Router](ctx),
 		dnsRouter: service.FromContext[adapter.DNSRouter](ctx),
 		outbound:  service.FromContext[adapter.OutboundManager](ctx),
