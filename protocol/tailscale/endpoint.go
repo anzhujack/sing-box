@@ -93,11 +93,12 @@ type Endpoint struct {
 	// nil through a partial init). Without this gate, a Box.Start
 	// failure that unwinds into Box.Close crashes the whole process
 	// instead of surfacing a clean error to the CLI.
-	serverStarted atomic.Bool
-	stack         *stack.Stack
-	icmpForwarder     *tun.ICMPForwarder
-	filter            *atomic.Pointer[filter.Filter]
-	onReconfigHook    wgengine.ReconfigListener
+	serverStarted  atomic.Bool
+	started        atomic.Bool
+	stack          *stack.Stack
+	icmpForwarder  *tun.ICMPForwarder
+	filter         *atomic.Pointer[filter.Filter]
+	onReconfigHook wgengine.ReconfigListener
 
 	cfg           *wgcfg.Config
 	dnsCfg        *tsDNS.Config
@@ -288,7 +289,7 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		if err != nil {
 			return nil, E.Cause(err, "inner domain resolver")
 		}
-		ep.innerDNSQueryOptions = *innerDNSOpts
+		ep.innerDNSQueryOptions = innerDNSOpts
 	}
 	return ep, nil
 }
