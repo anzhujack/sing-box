@@ -5,7 +5,6 @@ package tls
 import (
 	"context"
 	"crypto/tls"
-	"slices"
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
