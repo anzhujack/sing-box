@@ -80,7 +80,6 @@ type rankedOutbound struct {
 type URLTest struct {
 	outbound.Adapter
 	ctx                          context.Context
-	router                       adapter.Router
 	outbound                     adapter.OutboundManager
 	connection                   adapter.ConnectionManager
 	logger                       log.ContextLogger
@@ -119,7 +118,6 @@ func NewURLTest(ctx context.Context, router adapter.Router, logger log.ContextLo
 	outbound := &URLTest{
 		Adapter:                      outbound.NewAdapter(C.TypeURLTest, tag, []string{N.NetworkTCP, N.NetworkUDP}, options.Outbounds),
 		ctx:                          ctx,
-		router:                       router,
 		outbound:                     service.FromContext[adapter.OutboundManager](ctx),
 		connection:                   service.FromContext[adapter.ConnectionManager](ctx),
 		logger:                       logger,
@@ -590,7 +588,6 @@ func (s *URLTest) onProviderUpdated(tag string) error {
 
 type URLTestGroup struct {
 	ctx                          context.Context
-	router                       adapter.Router
 	outbound                     adapter.OutboundManager
 	pause                        pause.Manager
 	pauseCallback                *list.Element[pause.Callback]
@@ -721,7 +718,9 @@ func (g *URLTestGroup) Close() error {
 		return nil
 	}
 	g.ticker.Stop()
+	g.ticker = nil
 	g.pause.UnregisterCallback(g.pauseCallback)
+	g.pauseCallback = nil
 	close(g.close)
 	return nil
 }
@@ -995,7 +994,7 @@ func (g *URLTestGroup) rebuildRankedCandidates() {
 	})
 }
 
-func (g *URLTestGroup) loopCheck() {
+func (g *URLTestGroup) loopCheck(ticker *time.Ticker, closeChan <-chan struct{}) {
 	if time.Since(g.lastActive.Load()) > g.interval {
 		g.lastActive.Store(time.Now())
 		g.CheckOutbounds(false)
@@ -1006,16 +1005,18 @@ func (g *URLTestGroup) loopCheck() {
 		g.access.Unlock()
 
 		select {
-		case <-g.close:
+		case <-closeChan:
 			return
 		case <-tickerChan:
 		}
 		if time.Since(g.lastActive.Load()) > g.idleTimeout {
 			g.access.Lock()
-			g.ticker.Stop()
-			g.ticker = nil
-			g.pause.UnregisterCallback(g.pauseCallback)
-			g.pauseCallback = nil
+			if g.ticker == ticker {
+				g.ticker.Stop()
+				g.ticker = nil
+				g.pause.UnregisterCallback(g.pauseCallback)
+				g.pauseCallback = nil
+			}
 			g.access.Unlock()
 			g.logger.Info("health check paused due to idle timeout")
 			return

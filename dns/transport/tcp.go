@@ -170,6 +170,20 @@ func setConnDeadline(ctx context.Context, conn net.Conn, needClose bool) func() 
 	return func() {}
 }
 
+func setConnDeadline(ctx context.Context, conn net.Conn, needClose bool) func() {
+	if needClose {
+		stop := context.AfterFunc(ctx, func() {
+			conn.Close()
+		})
+		return func() { stop() }
+	}
+	if d, ok := ctx.Deadline(); ok {
+		conn.SetDeadline(d)
+		return func() { conn.SetDeadline(time.Time{}) }
+	}
+	return func() {}
+}
+
 func ReadMessage(reader io.Reader) (*mDNS.Msg, error) {
 	var responseLen uint16
 	err := binary.Read(reader, binary.BigEndian, &responseLen)

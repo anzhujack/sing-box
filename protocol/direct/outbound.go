@@ -129,7 +129,6 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 	if err != nil {
 		return nil, err
 	}
-	// conn = h.loopBack.NewPacketConn(bufio.NewPacketConn(conn), destination)
 	return conn, nil
 }
 
@@ -260,18 +259,3 @@ func (h *Outbound) ListenSerialNetworkPacket(ctx context.Context, destination M.
 func (h *Outbound) IsEmpty() bool {
 	return h.isEmpty
 }
-
-/*func (h *Outbound) NewConnection(ctx context.Context, conn net.Conn, metadata adapter.InboundContext) error {
-	if h.loopBack.CheckConn(metadata.Source.AddrPort(), M.AddrPortFromNet(conn.LocalAddr())) {
-		return E.New("reject loopback connection to ", metadata.Destination)
-	}
-	return NewConnection(ctx, h, conn, metadata)
-}
-
-func (h *Outbound) NewPacketConnection(ctx context.Context, conn N.PacketConn, metadata adapter.InboundContext) error {
-	if h.loopBack.CheckPacketConn(metadata.Source.AddrPort(), M.AddrPortFromNet(conn.LocalAddr())) {
-		return E.New("reject loopback packet connection to ", metadata.Destination)
-	}
-	return NewPacketConnection(ctx, h, conn, metadata)
-}
-*/

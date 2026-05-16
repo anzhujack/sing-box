@@ -58,7 +58,6 @@ func TestRouteRuleSetMergeDestinationAddressGroup(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			ruleSet := newLocalRuleSetForTest("merge-destination", testCase.inner)
@@ -224,7 +223,6 @@ func TestRouteRuleSetOuterGroupedStateMergesIntoSameGroup(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			ruleSet := newLocalRuleSetForTest("outer-merge-"+testCase.name, headlessDefaultRule(t, func(rule *abstractDefaultRule) {
@@ -1027,7 +1025,6 @@ func TestDNSInvertAddressLimitPreLookupRegression(t *testing.T) {
 		},
 	}
 	for _, testCase := range testCases {
-		testCase := testCase
 		t.Run(testCase.name, func(t *testing.T) {
 			t.Parallel()
 			rule := dnsRuleForTest(func(rule *abstractDefaultRule) {
