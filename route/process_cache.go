@@ -3,7 +3,6 @@ package route
 import (
 	"context"
 	"net/netip"
-	"slices"
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"

@@ -145,7 +145,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Mount("/configs", configRouter(s, logFactory))
 		r.Mount("/proxies", proxyRouter(s, s.router))
 		r.Mount("/rules", ruleRouter(s.router, s.dnsRouter))
-		r.Mount("/connections", connectionRouter(s.ctx, s.router, trafficManager))
+		r.Mount("/connections", connectionRouter(s.ctx, s.network, trafficManager))
 		r.Mount("/providers/proxies", proxyProviderRouter(s))
 		r.Mount("/providers/rules", ruleProviderRouter(s.router))
 		r.Mount("/script", scriptRouter())

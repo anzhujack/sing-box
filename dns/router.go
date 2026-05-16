@@ -82,23 +82,6 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 			optimisticTimeout = 3 * 24 * time.Hour
 		}
 	}
-	if options.DNSClientOptions.IndependentCache {
-		deprecated.Report(ctx, deprecated.OptionIndependentDNSCache)
-	}
-	var optimisticTimeout time.Duration
-	optimisticOptions := common.PtrValueOrDefault(options.DNSClientOptions.Optimistic)
-	if optimisticOptions.Enabled {
-		if options.DNSClientOptions.DisableCache {
-			return nil, E.New("`optimistic` is conflict with `disable_cache`")
-		}
-		if options.DNSClientOptions.DisableExpire {
-			return nil, E.New("`optimistic` is conflict with `disable_expire`")
-		}
-		optimisticTimeout = time.Duration(optimisticOptions.Timeout)
-		if optimisticTimeout == 0 {
-			optimisticTimeout = 3 * 24 * time.Hour
-		}
-	}
 	router.client = NewClient(ClientOptions{
 		Context:           ctx,
 		Timeout:           time.Duration(options.DNSClientOptions.Timeout),

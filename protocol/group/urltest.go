@@ -388,7 +388,6 @@ func (s *URLTest) isGroupActive() bool {
 	return time.Since(s.group.lastActive.Load()) <= s.group.idleTimeout
 }
 
-
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	s.group.Touch()
 	var outbound adapter.Outbound
@@ -585,7 +584,6 @@ func (s *URLTest) onProviderUpdated(tag string) error {
 	return nil
 }
 
-
 type URLTestGroup struct {
 	ctx                          context.Context
 	outbound                     adapter.OutboundManager
@@ -706,7 +704,7 @@ func (g *URLTestGroup) Touch() {
 		return
 	}
 	g.ticker = time.NewTicker(g.interval)
-	go g.loopCheck()
+	go g.loopCheck(g.ticker, g.close)
 	g.pauseCallback = pause.RegisterTicker(g.pause, g.ticker, g.interval, nil)
 	g.logger.Info("health check resumed")
 }
@@ -734,6 +732,7 @@ func (g *URLTestGroup) Close() error {
 //     haven't seen too many dial failures on it, give it a grace period. Avoids
 //     thrash when the test URL is temporarily blocked while traffic still works.
 //  3. Only switch when current is truly unusable (dropped from set, or marked bad).
+//
 // pinnedOutbound returns the manually-pinned outbound when it is still a
 // member of the snapshot and supports the requested network; nil otherwise.
 // When the pin has been removed from the snapshot (provider update dropped

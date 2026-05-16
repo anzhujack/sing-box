@@ -275,6 +275,7 @@ type VlessOption struct {
 	HTTP2Opts      HTTP2Options `yaml:"h2-opts,omitempty"`
 	GrpcOpts       GrpcOptions  `yaml:"grpc-opts,omitempty"`
 	WSOpts         WSOptions    `yaml:"ws-opts,omitempty"`
+	XHTTPOpts      XHTTPClashOptions `yaml:"xhttp-opts,omitempty"`
 	MuxOpts        *MuxOptions  `yaml:"smux,omitempty"`
 }
 
@@ -292,6 +293,12 @@ func (v *VlessOption) Build() any {
 	case "packet":
 		v.PacketEncoding = "packetaddr"
 	}
+	var transport *option.V2RayTransportOptions
+	if v.Network == "xhttp" {
+		transport = v.XHTTPOpts.Build()
+	} else {
+		transport = clashTransport(v.Network, v.HTTPOpts, v.HTTP2Opts, v.GrpcOpts, v.WSOpts)
+	}
 	return &option.VLESSOutboundOptions{
 		DialerOptions:               v.DialerOptions.Build(),
 		ServerOptions:               v.ServerOptions.Build(),
@@ -300,7 +307,7 @@ func (v *VlessOption) Build() any {
 		Network:                     clashNetworks(v.UDP),
 		OutboundTLSOptionsContainer: clashTLSOptions(v.Server, v.TLSOptions),
 		Multiplex:                   v.MuxOpts.Build(),
-		Transport:                   clashTransport(v.Network, v.HTTPOpts, v.HTTP2Opts, v.GrpcOpts, v.WSOpts),
+		Transport:                   transport,
 		PacketEncoding:              &v.PacketEncoding,
 	}
 }
@@ -954,4 +961,43 @@ func trimStringArray(array []string) []string {
 	return common.Filter(array, func(it string) bool {
 		return strings.TrimSpace(it) != ""
 	})
+}
+
+// XHTTPClashOptions represents xhttp transport options in Clash/mihomo yaml format.
+type XHTTPClashOptions struct {
+	Path                  string            `yaml:"path,omitempty"`
+	Host                  string            `yaml:"host,omitempty"`
+	Mode                  string            `yaml:"mode,omitempty"`
+	XPaddingBytes         string            `yaml:"x-padding-bytes,omitempty"`
+	NoSSEHeader           bool              `yaml:"no-sse-header,omitempty"`
+	ScMaxEachPostBytes    int               `yaml:"sc-max-each-post-bytes,omitempty"`
+	ScMinPostsIntervalMs  int               `yaml:"sc-min-posts-interval-ms,omitempty"`
+	ScMaxBufferedPosts    int               `yaml:"sc-max-buffered-posts,omitempty"`
+	Headers               map[string]string `yaml:"headers,omitempty"`
+}
+
+func (x *XHTTPClashOptions) Build() *option.V2RayTransportOptions {
+	xopts := &option.V2RayXHTTPOptions{
+		Path:                 x.Path,
+		Mode:                 x.Mode,
+		XPaddingBytes:        x.XPaddingBytes,
+		NoSSEHeader:          x.NoSSEHeader,
+		ScMaxEachPostBytes:   x.ScMaxEachPostBytes,
+		ScMinPostsIntervalMs: x.ScMinPostsIntervalMs,
+		ScMaxBufferedPosts:   x.ScMaxBufferedPosts,
+	}
+	if x.Host != "" {
+		xopts.Host = strings.Split(x.Host, ",")
+	}
+	if len(x.Headers) > 0 {
+		h := badoption.HTTPHeader{}
+		for k, v := range x.Headers {
+			h[k] = badoption.Listable[string]{v}
+		}
+		xopts.Headers = h
+	}
+	return &option.V2RayTransportOptions{
+		Type:  C.V2RayTransportTypeXHTTP,
+		Extra: xopts,
+	}
 }

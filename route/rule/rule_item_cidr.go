@@ -2,11 +2,9 @@ package rule
 
 import (
 	"net/netip"
-	"slices"
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 
 	"go4.org/netipx"

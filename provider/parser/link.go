@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"encoding/json"
 	"net/url"
 	"reflect"
 	"regexp"
@@ -13,9 +14,68 @@ import (
 	"github.com/sagernet/sing/common/byteformats"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
-	"github.com/sagernet/sing/common/json"
+	singjson "github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/common/json/badoption"
 )
+
+// v2rayTransportXHTTP builds an xhttp V2RayTransportOptions from link query params.
+func v2rayTransportXHTTP(proxy map[string]string) option.V2RayTransportOptions {
+	xopts := &option.V2RayXHTTPOptions{}
+	if host, ok := proxy["host"]; ok && host != "" {
+		xopts.Host = strings.Split(host, ",")
+	}
+	if path, ok := proxy["path"]; ok && path != "" {
+		xopts.Path = path
+	}
+	if mode, ok := proxy["mode"]; ok && mode != "" {
+		xopts.Mode = mode
+	}
+	// extra= is a url-encoded JSON that can override/extend xhttp fields.
+	// The JSON may use camelCase keys (Xray convention) while our struct uses snake_case tags,
+	// so we manually map known camelCase fields.
+	if extra, ok := proxy["extra"]; ok && extra != "" {
+		// First try standard unmarshal (handles snake_case keys)
+		_ = json.Unmarshal([]byte(extra), xopts)
+		// Then handle camelCase keys from Xray-style links
+		var raw map[string]json.RawMessage
+		if json.Unmarshal([]byte(extra), &raw) == nil {
+			if v, ok := raw["xPaddingBytes"]; ok {
+				var s string
+				if json.Unmarshal(v, &s) == nil {
+					xopts.XPaddingBytes = s
+				}
+			}
+			if v, ok := raw["scMaxEachPostBytes"]; ok {
+				var n int
+				if json.Unmarshal(v, &n) == nil {
+					xopts.ScMaxEachPostBytes = n
+				}
+			}
+			if v, ok := raw["scMinPostsIntervalMs"]; ok {
+				var n int
+				if json.Unmarshal(v, &n) == nil {
+					xopts.ScMinPostsIntervalMs = n
+				}
+			}
+			if v, ok := raw["scMaxBufferedPosts"]; ok {
+				var n int
+				if json.Unmarshal(v, &n) == nil {
+					xopts.ScMaxBufferedPosts = n
+				}
+			}
+			if v, ok := raw["noSSEHeader"]; ok {
+				var b bool
+				if json.Unmarshal(v, &b) == nil {
+					xopts.NoSSEHeader = b
+				}
+			}
+		}
+	}
+	return option.V2RayTransportOptions{
+		Type:  C.V2RayTransportTypeXHTTP,
+		Extra: xopts,
+	}
+}
 
 func ParseSubscriptionLink(link string) (option.Outbound, error) {
 	reg := regexp.MustCompile(`^(.*?)(://)(.*?)([@?#].*)?$`)
@@ -232,7 +292,7 @@ func parseVMessLink(link string) (option.Outbound, error) {
 	var proxy map[string]string
 	reg := regexp.MustCompile(`(\"[^:,]+?\"[ \t]*:[ \t]*)(\d+|true|false)`)
 	s := reg.ReplaceAllString(link, `$1"$2"`)
-	err := json.Unmarshal([]byte(s[8:]), &proxy)
+	err := singjson.Unmarshal([]byte(s[8:]), &proxy)
 	if err != nil {
 		proxy = make(map[string]string)
 		linkURL, err := url.Parse(link)
@@ -357,6 +417,8 @@ func parseVMessLink(link string) (option.Outbound, error) {
 				if host, exists := proxy["host"]; exists && host != "" {
 					Transport.GRPCOptions.ServiceName = host
 				}
+			case "xhttp":
+				Transport = v2rayTransportXHTTP(proxy)
 			default:
 				continue
 			}
@@ -429,6 +491,8 @@ func parseVLESSLink(link string) (option.Outbound, error) {
 				if serviceName, exists := proxy["serviceName"]; exists && serviceName != "" {
 					Transport.GRPCOptions.ServiceName = serviceName
 				}
+			case "xhttp":
+				Transport = v2rayTransportXHTTP(proxy)
 			default:
 				continue
 			}
