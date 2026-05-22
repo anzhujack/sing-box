@@ -52,15 +52,15 @@ require (
 	github.com/sagernet/sing v0.8.10-0.20260428084616-2bc976d03e39
 	github.com/sagernet/sing-cloudflared v0.1.0
 	github.com/sagernet/sing-mux v0.3.4
-	github.com/sagernet/sing-quic v0.6.2-0.20260512113342-74f3e685d5a7
+	github.com/sagernet/sing-quic v0.6.2-0.20260520073201-c8655743eb6e
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
-	github.com/sagernet/sing-shadowtls v0.2.1-0.20250503051639-fcd445d33c11
-	github.com/sagernet/sing-tun v0.8.10-0.20260502074200-87904db3a2c1
+	github.com/sagernet/sing-shadowtls v0.2.1
+	github.com/sagernet/sing-tun v0.8.10-0.20260520101551-ce2b05a9b67f
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1
 	github.com/sagernet/smux v1.5.50-sing-box-mod.1
-	github.com/sagernet/tailscale v1.92.4-sing-box-1.13-mod.7
-	github.com/sagernet/wireguard-go v0.0.2-beta.1.0.20260224074747-506b7631853c
+	github.com/sagernet/tailscale v1.92.4-sing-box-1.13-mod.7.0.20260521041027-e9a3134eb397
+	github.com/sagernet/wireguard-go v0.0.3
 	github.com/sagernet/ws v0.0.0-20231204124109-acfe8907c854
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
