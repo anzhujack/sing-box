@@ -31,8 +31,8 @@ import (
 	"github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/route/rule"
-	tun "github.com/sagernet/sing-tun"
+	R "github.com/sagernet/sing-box/route/rule"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing-tun/ping"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
@@ -90,20 +90,10 @@ type Endpoint struct {
 	network           adapter.NetworkManager
 	platformInterface adapter.PlatformInterface
 	server            *tsnet.Server
-	// serverStarted flips to true AFTER tsnet.Server.Start() returns
-	// nil. Close() reads this to decide whether to invoke
-	// tsnet.Server.Close — the upstream library's Close panics with
-	// a nil-deref when the server was allocated but never fully
-	// Started (some inner fields — LocalBackend / ipnlocal — stay
-	// nil through a partial init). Without this gate, a Box.Start
-	// failure that unwinds into Box.Close crashes the whole process
-	// instead of surfacing a clean error to the CLI.
-	serverStarted  atomic.Bool
-	started        atomic.Bool
-	stack          *stack.Stack
-	icmpForwarder  *tun.ICMPForwarder
-	filter         *atomic.Pointer[filter.Filter]
-	onReconfigHook wgengine.ReconfigListener
+	stack             *stack.Stack
+	icmpForwarder     *tun.ICMPForwarder
+	filter            *atomic.Pointer[filter.Filter]
+	onReconfigHook    wgengine.ReconfigListener
 
 	cfg           *wgcfg.Config
 	dnsCfg        *tsDNS.Config
@@ -123,13 +113,12 @@ type Endpoint struct {
 
 	systemInterface     bool
 	systemInterfaceName string
-	systemInterfaceGSO  bool
 	systemInterfaceMTU  uint32
+	serverStarted       bool
+	started             atomic.Bool
 	systemTun           tun.Tun
 	systemDialer        *dialer.DefaultDialer
 	fallbackTCPCloser   func()
-
-	innerDNSQueryOptions adapter.DNSQueryOptions
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.TailscaleEndpointOptions) (adapter.Endpoint, error) {
@@ -162,10 +151,6 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	gso := options.SystemInterface
-	if options.SystemInterfaceGSO != nil {
-		gso = *options.SystemInterfaceGSO
-	}
 	var remoteIsDomain bool
 	if options.ControlURL != "" {
 		controlURL, err := url.Parse(options.ControlURL)
@@ -189,41 +174,46 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	dialerQueryOptions := outboundDialer.(dialer.ResolveDialer).QueryOptions()
 	dnsRouter := service.FromContext[adapter.DNSRouter](ctx)
-	httpClientManager := service.FromContext[adapter.HTTPClientManager](ctx)
-	controlTransport, err := httpClientManager.ResolveTransport(ctx, logger, controlHTTPClientOptions)
-	if err != nil {
-		return nil, E.Cause(err, "create control HTTP client")
-	}
-	controlHTTPClient := &http.Client{Transport: controlTransport}
-	server := &tsnet.Server{
-		Dir:      stateDirectory,
-		Hostname: hostname,
-		Logf: func(format string, args ...any) {
-			logger.Trace(fmt.Sprintf(format, args...))
+	return &Endpoint{
+		Adapter:           endpoint.NewAdapter(C.TypeTailscale, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, nil),
+		ctx:               ctx,
+		router:            router,
+		logger:            logger,
+		dnsRouter:         dnsRouter,
+		queryOptions:      dialerQueryOptions,
+		network:           service.FromContext[adapter.NetworkManager](ctx),
+		platformInterface: service.FromContext[adapter.PlatformInterface](ctx),
+		server: &tsnet.Server{
+			Dir:      stateDirectory,
+			Hostname: hostname,
+			Logf: func(format string, args ...any) {
+				logger.Trace(fmt.Sprintf(format, args...))
+			},
+			UserLogf: func(format string, args ...any) {
+				logger.Debug(fmt.Sprintf(format, args...))
+			},
+			Ephemeral:     options.Ephemeral,
+			AuthKey:       options.AuthKey,
+			ControlURL:    options.ControlURL,
+			AdvertiseTags: options.AdvertiseTags,
+			Dialer:        &endpointDialer{Dialer: outboundDialer, logger: logger},
+			LookupHook: func(ctx context.Context, host string) ([]netip.Addr, error) {
+				return dnsRouter.Lookup(ctx, host, dialerQueryOptions)
+			},
+			DNS: &dnsConfigurtor{},
+			HTTPClient: &http.Client{
+				Transport: &http.Transport{
+					ForceAttemptHTTP2: true,
+					DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+						return outboundDialer.DialContext(ctx, network, M.ParseSocksaddr(address))
+					},
+					TLSClientConfig: &tls.Config{
+						RootCAs: adapter.RootPoolFromContext(ctx),
+						Time:    ntp.TimeFuncFromContext(ctx),
+					},
+				},
+			},
 		},
-		UserLogf: func(format string, args ...any) {
-			logger.Debug(fmt.Sprintf(format, args...))
-		},
-		Ephemeral:     options.Ephemeral,
-		AuthKey:       options.AuthKey,
-		ControlURL:    options.ControlURL,
-		AdvertiseTags: options.AdvertiseTags,
-		Dialer:        &endpointDialer{Dialer: outboundDialer, logger: logger},
-		LookupHook: func(ctx context.Context, host string) ([]netip.Addr, error) {
-			return dnsRouter.Lookup(ctx, host, outboundDialer.(dialer.ResolveDialer).QueryOptions())
-		},
-		DNS:        &dnsConfigurtor{},
-		HTTPClient: controlHTTPClient,
-	}
-	ep := &Endpoint{
-		Adapter:                    endpoint.NewAdapterWithDialerOptions(C.TypeTailscale, tag, []string{N.NetworkTCP, N.NetworkUDP, N.NetworkICMP}, controlHTTPClientOptions.DialerOptions),
-		ctx:                        ctx,
-		router:                     router,
-		logger:                     logger,
-		dnsRouter:                  dnsRouter,
-		network:                    service.FromContext[adapter.NetworkManager](ctx),
-		platformInterface:          service.FromContext[adapter.PlatformInterface](ctx),
-		server:                     server,
 		acceptRoutes:               options.AcceptRoutes,
 		exitNode:                   options.ExitNode,
 		exitNodeAllowLANAccess:     options.ExitNodeAllowLANAccess,
@@ -234,18 +224,9 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		relayServerStaticEndpoints: options.RelayServerStaticEndpoints,
 		udpTimeout:                 udpTimeout,
 		systemInterface:            options.SystemInterface,
-		systemInterfaceGSO:         gso,
 		systemInterfaceName:        options.SystemInterfaceName,
 		systemInterfaceMTU:         options.SystemInterfaceMTU,
-	}
-	if options.InnerDomainResolver != nil {
-		innerDNSOpts, err := adapter.DNSQueryOptionsFrom(ctx, options.InnerDomainResolver)
-		if err != nil {
-			return nil, E.Cause(err, "inner domain resolver")
-		}
-		ep.innerDNSQueryOptions = innerDNSOpts
-	}
-	return ep, nil
+	}, nil
 }
 
 func (t *Endpoint) Start(stage adapter.StartStage) error {
@@ -298,7 +279,7 @@ func (t *Endpoint) start() error {
 		tunOptions := tun.Options{
 			Name:                      tunName,
 			MTU:                       mtu,
-			GSO:                       t.systemInterfaceGSO,
+			GSO:                       true,
 			InterfaceScope:            true,
 			InterfaceMonitor:          t.network.InterfaceMonitor(),
 			InterfaceFinder:           t.network.InterfaceFinder(),
@@ -354,11 +335,7 @@ func (t *Endpoint) postStart() error {
 		}
 		return err
 	}
-	// Mark as fully started; Close() will now invoke tsnet.Close
-	// safely. Before this flag flips, tsnet.Server's inner fields
-	// (LocalBackend / ipnlocal / netstack) may still be nil and a
-	// direct Close would panic at tsnet.go:455.
-	t.serverStarted.Store(true)
+	t.serverStarted = true
 	if t.fallbackTCPCloser == nil {
 		t.fallbackTCPCloser = t.server.RegisterFallbackTCPHandler(func(src, dst netip.AddrPort) (handler func(net.Conn), intercept bool) {
 			return func(conn net.Conn) {
@@ -554,28 +531,11 @@ func (t *Endpoint) SetTailscaleExitNode(ctx context.Context, stableID string) er
 }
 
 func (t *Endpoint) Close() error {
-	// tsnet.Server.Close is not safe to call on a partially-built
-	// Server (Start() never ran or ran and errored). The upstream
-	// library panics with a nil-deref at tsnet.go:455 accessing
-	// LocalBackend / ipnlocal fields that a half-init skipped. We
-	// gate the call on serverStarted (set only after Start returned
-	// nil) AND wrap it in a recover as a belt-and-suspenders defence
-	// — the upstream bug might surface in other code paths as the
-	// tailscale fork evolves.
 	var err error
-	if t.serverStarted.Load() && t.server != nil {
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					if t.logger != nil {
-						t.logger.Warn("tsnet.Server.Close panicked during endpoint shutdown: ", r,
-							" — proceeding with graceful endpoint teardown")
-					}
-				}
-			}()
-			err = common.Close(common.PtrOrNil(t.server))
-		}()
-		t.serverStarted.Store(false)
+	t.started.Store(false)
+	if t.serverStarted {
+		err = common.Close(common.PtrOrNil(t.server))
+		t.serverStarted = false
 	}
 	netmon.RegisterInterfaceGetter(nil)
 	netns.SetControlFunc(nil)
@@ -601,7 +561,7 @@ func (t *Endpoint) DialContext(ctx context.Context, network string, destination 
 		return nil, E.New("Tailscale is not ready yet")
 	}
 	if destination.IsDomain() {
-		destinationAddresses, err := t.dnsRouter.Lookup(ctx, destination.Fqdn, t.innerDNSQueryOptions)
+		destinationAddresses, err := t.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -690,7 +650,7 @@ func (t *Endpoint) listenPacketWithAddress(ctx context.Context, destination M.So
 func (t *Endpoint) ListenPacketWithDestination(ctx context.Context, destination M.Socksaddr) (net.PacketConn, netip.Addr, error) {
 	t.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	if destination.IsDomain() {
-		destinationAddresses, err := t.dnsRouter.Lookup(ctx, destination.Fqdn, t.innerDNSQueryOptions)
+		destinationAddresses, err := t.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, netip.Addr{}, err
 		}
