@@ -2,6 +2,10 @@
 icon: material/new-box
 ---
 
+!!! quote "sing-box 1.14.0 中的更改"
+
+    :material-plus: [ssh_server](#ssh_server)
+
 !!! quote "sing-box 1.13.0 中的更改"
 
     :material-plus: [relay_server_port](#relay_server_port)  
@@ -76,6 +80,10 @@ icon: material/new-box
 节点的主机名。
 
 默认使用系统主机名。
+
+!!! question "自 sing-box 1.14.0 起"
+
+    在 iOS、tvOS 和 Android 上，默认使用设备名称。
 
 示例：`localhost`
 

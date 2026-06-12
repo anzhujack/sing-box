@@ -110,6 +110,7 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
 		GSO:            options.GSO,
 		Handler:        options.Handler,
 		UDPTimeout:     options.UDPTimeout,
+		ICMPTimeout:    options.ICMPTimeout,
 		CreateDialer:   options.CreateDialer,
 		Name:           options.Name,
 		MTU:            options.MTU,

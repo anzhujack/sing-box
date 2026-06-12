@@ -15,8 +15,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StartedService_StopService_FullMethodName              = "/daemon.StartedService/StopService"
-	StartedService_ReloadService_FullMethodName            = "/daemon.StartedService/ReloadService"
+	StartedService_GetVersion_FullMethodName               = "/daemon.StartedService/GetVersion"
 	StartedService_SubscribeServiceStatus_FullMethodName   = "/daemon.StartedService/SubscribeServiceStatus"
 	StartedService_SubscribeLog_FullMethodName             = "/daemon.StartedService/SubscribeLog"
 	StartedService_GetDefaultLogLevel_FullMethodName       = "/daemon.StartedService/GetDefaultLogLevel"
@@ -29,9 +28,6 @@ const (
 	StartedService_URLTest_FullMethodName                  = "/daemon.StartedService/URLTest"
 	StartedService_SelectOutbound_FullMethodName           = "/daemon.StartedService/SelectOutbound"
 	StartedService_SetGroupExpand_FullMethodName           = "/daemon.StartedService/SetGroupExpand"
-	StartedService_GetSystemProxyStatus_FullMethodName     = "/daemon.StartedService/GetSystemProxyStatus"
-	StartedService_SetSystemProxyEnabled_FullMethodName    = "/daemon.StartedService/SetSystemProxyEnabled"
-	StartedService_TriggerDebugCrash_FullMethodName        = "/daemon.StartedService/TriggerDebugCrash"
 	StartedService_TriggerOOMReport_FullMethodName         = "/daemon.StartedService/TriggerOOMReport"
 	StartedService_SubscribeConnections_FullMethodName     = "/daemon.StartedService/SubscribeConnections"
 	StartedService_CloseConnection_FullMethodName          = "/daemon.StartedService/CloseConnection"
@@ -44,6 +40,7 @@ const (
 	StartedService_SubscribeTailscaleStatus_FullMethodName = "/daemon.StartedService/SubscribeTailscaleStatus"
 	StartedService_StartTailscalePing_FullMethodName       = "/daemon.StartedService/StartTailscalePing"
 	StartedService_SetTailscaleExitNode_FullMethodName     = "/daemon.StartedService/SetTailscaleExitNode"
+	StartedService_TailscaleLogout_FullMethodName          = "/daemon.StartedService/TailscaleLogout"
 	StartedService_StartTailscaleSSHSession_FullMethodName = "/daemon.StartedService/StartTailscaleSSHSession"
 )
 
@@ -51,8 +48,7 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type StartedServiceClient interface {
-	StopService(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	ReloadService(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	GetVersion(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*Version, error)
 	SubscribeServiceStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ServiceStatus], error)
 	SubscribeLog(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Log], error)
 	GetDefaultLogLevel(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*DefaultLogLevel, error)
@@ -65,9 +61,6 @@ type StartedServiceClient interface {
 	URLTest(ctx context.Context, in *URLTestRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SelectOutbound(ctx context.Context, in *SelectOutboundRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SetGroupExpand(ctx context.Context, in *SetGroupExpandRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	GetSystemProxyStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SystemProxyStatus, error)
-	SetSystemProxyEnabled(ctx context.Context, in *SetSystemProxyEnabledRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
-	TriggerDebugCrash(ctx context.Context, in *DebugCrashRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	TriggerOOMReport(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	SubscribeConnections(ctx context.Context, in *SubscribeConnectionsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ConnectionEvents], error)
 	CloseConnection(ctx context.Context, in *CloseConnectionRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -80,6 +73,7 @@ type StartedServiceClient interface {
 	SubscribeTailscaleStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TailscaleStatusUpdate], error)
 	StartTailscalePing(ctx context.Context, in *TailscalePingRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TailscalePingResponse], error)
 	SetTailscaleExitNode(ctx context.Context, in *SetTailscaleExitNodeRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
+	TailscaleLogout(ctx context.Context, in *TailscaleLogoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	StartTailscaleSSHSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TailscaleSSHClientMessage, TailscaleSSHServerMessage], error)
 }
 
@@ -91,20 +85,10 @@ func NewStartedServiceClient(cc grpc.ClientConnInterface) StartedServiceClient {
 	return &startedServiceClient{cc}
 }
 
-func (c *startedServiceClient) StopService(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+func (c *startedServiceClient) GetVersion(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*Version, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, StartedService_StopService_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *startedServiceClient) ReloadService(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, StartedService_ReloadService_FullMethodName, in, out, cOpts...)
+	out := new(Version)
+	err := c.cc.Invoke(ctx, StartedService_GetVersion_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -270,36 +254,6 @@ func (c *startedServiceClient) SetGroupExpand(ctx context.Context, in *SetGroupE
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(emptypb.Empty)
 	err := c.cc.Invoke(ctx, StartedService_SetGroupExpand_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *startedServiceClient) GetSystemProxyStatus(ctx context.Context, in *emptypb.Empty, opts ...grpc.CallOption) (*SystemProxyStatus, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(SystemProxyStatus)
-	err := c.cc.Invoke(ctx, StartedService_GetSystemProxyStatus_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *startedServiceClient) SetSystemProxyEnabled(ctx context.Context, in *SetSystemProxyEnabledRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, StartedService_SetSystemProxyEnabled_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *startedServiceClient) TriggerDebugCrash(ctx context.Context, in *DebugCrashRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(emptypb.Empty)
-	err := c.cc.Invoke(ctx, StartedService_TriggerDebugCrash_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -480,6 +434,16 @@ func (c *startedServiceClient) SetTailscaleExitNode(ctx context.Context, in *Set
 	return out, nil
 }
 
+func (c *startedServiceClient) TailscaleLogout(ctx context.Context, in *TailscaleLogoutRequest, opts ...grpc.CallOption) (*emptypb.Empty, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(emptypb.Empty)
+	err := c.cc.Invoke(ctx, StartedService_TailscaleLogout_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *startedServiceClient) StartTailscaleSSHSession(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[TailscaleSSHClientMessage, TailscaleSSHServerMessage], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	stream, err := c.cc.NewStream(ctx, &StartedService_ServiceDesc.Streams[11], StartedService_StartTailscaleSSHSession_FullMethodName, cOpts...)
@@ -497,8 +461,7 @@ type StartedService_StartTailscaleSSHSessionClient = grpc.BidiStreamingClient[Ta
 // All implementations must embed UnimplementedStartedServiceServer
 // for forward compatibility.
 type StartedServiceServer interface {
-	StopService(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
-	ReloadService(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
+	GetVersion(context.Context, *emptypb.Empty) (*Version, error)
 	SubscribeServiceStatus(*emptypb.Empty, grpc.ServerStreamingServer[ServiceStatus]) error
 	SubscribeLog(*emptypb.Empty, grpc.ServerStreamingServer[Log]) error
 	GetDefaultLogLevel(context.Context, *emptypb.Empty) (*DefaultLogLevel, error)
@@ -511,9 +474,6 @@ type StartedServiceServer interface {
 	URLTest(context.Context, *URLTestRequest) (*emptypb.Empty, error)
 	SelectOutbound(context.Context, *SelectOutboundRequest) (*emptypb.Empty, error)
 	SetGroupExpand(context.Context, *SetGroupExpandRequest) (*emptypb.Empty, error)
-	GetSystemProxyStatus(context.Context, *emptypb.Empty) (*SystemProxyStatus, error)
-	SetSystemProxyEnabled(context.Context, *SetSystemProxyEnabledRequest) (*emptypb.Empty, error)
-	TriggerDebugCrash(context.Context, *DebugCrashRequest) (*emptypb.Empty, error)
 	TriggerOOMReport(context.Context, *emptypb.Empty) (*emptypb.Empty, error)
 	SubscribeConnections(*SubscribeConnectionsRequest, grpc.ServerStreamingServer[ConnectionEvents]) error
 	CloseConnection(context.Context, *CloseConnectionRequest) (*emptypb.Empty, error)
@@ -526,6 +486,7 @@ type StartedServiceServer interface {
 	SubscribeTailscaleStatus(*emptypb.Empty, grpc.ServerStreamingServer[TailscaleStatusUpdate]) error
 	StartTailscalePing(*TailscalePingRequest, grpc.ServerStreamingServer[TailscalePingResponse]) error
 	SetTailscaleExitNode(context.Context, *SetTailscaleExitNodeRequest) (*emptypb.Empty, error)
+	TailscaleLogout(context.Context, *TailscaleLogoutRequest) (*emptypb.Empty, error)
 	StartTailscaleSSHSession(grpc.BidiStreamingServer[TailscaleSSHClientMessage, TailscaleSSHServerMessage]) error
 	mustEmbedUnimplementedStartedServiceServer()
 }
@@ -537,12 +498,8 @@ type StartedServiceServer interface {
 // pointer dereference when methods are called.
 type UnimplementedStartedServiceServer struct{}
 
-func (UnimplementedStartedServiceServer) StopService(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method StopService not implemented")
-}
-
-func (UnimplementedStartedServiceServer) ReloadService(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method ReloadService not implemented")
+func (UnimplementedStartedServiceServer) GetVersion(context.Context, *emptypb.Empty) (*Version, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetVersion not implemented")
 }
 
 func (UnimplementedStartedServiceServer) SubscribeServiceStatus(*emptypb.Empty, grpc.ServerStreamingServer[ServiceStatus]) error {
@@ -593,18 +550,6 @@ func (UnimplementedStartedServiceServer) SetGroupExpand(context.Context, *SetGro
 	return nil, status.Error(codes.Unimplemented, "method SetGroupExpand not implemented")
 }
 
-func (UnimplementedStartedServiceServer) GetSystemProxyStatus(context.Context, *emptypb.Empty) (*SystemProxyStatus, error) {
-	return nil, status.Error(codes.Unimplemented, "method GetSystemProxyStatus not implemented")
-}
-
-func (UnimplementedStartedServiceServer) SetSystemProxyEnabled(context.Context, *SetSystemProxyEnabledRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method SetSystemProxyEnabled not implemented")
-}
-
-func (UnimplementedStartedServiceServer) TriggerDebugCrash(context.Context, *DebugCrashRequest) (*emptypb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "method TriggerDebugCrash not implemented")
-}
-
 func (UnimplementedStartedServiceServer) TriggerOOMReport(context.Context, *emptypb.Empty) (*emptypb.Empty, error) {
 	return nil, status.Error(codes.Unimplemented, "method TriggerOOMReport not implemented")
 }
@@ -653,6 +598,10 @@ func (UnimplementedStartedServiceServer) SetTailscaleExitNode(context.Context, *
 	return nil, status.Error(codes.Unimplemented, "method SetTailscaleExitNode not implemented")
 }
 
+func (UnimplementedStartedServiceServer) TailscaleLogout(context.Context, *TailscaleLogoutRequest) (*emptypb.Empty, error) {
+	return nil, status.Error(codes.Unimplemented, "method TailscaleLogout not implemented")
+}
+
 func (UnimplementedStartedServiceServer) StartTailscaleSSHSession(grpc.BidiStreamingServer[TailscaleSSHClientMessage, TailscaleSSHServerMessage]) error {
 	return status.Error(codes.Unimplemented, "method StartTailscaleSSHSession not implemented")
 }
@@ -677,38 +626,20 @@ func RegisterStartedServiceServer(s grpc.ServiceRegistrar, srv StartedServiceSer
 	s.RegisterService(&StartedService_ServiceDesc, srv)
 }
 
-func _StartedService_StopService_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+func _StartedService_GetVersion_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(StartedServiceServer).StopService(ctx, in)
+		return srv.(StartedServiceServer).GetVersion(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: StartedService_StopService_FullMethodName,
+		FullMethod: StartedService_GetVersion_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(StartedServiceServer).StopService(ctx, req.(*emptypb.Empty))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _StartedService_ReloadService_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(emptypb.Empty)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(StartedServiceServer).ReloadService(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: StartedService_ReloadService_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(StartedServiceServer).ReloadService(ctx, req.(*emptypb.Empty))
+		return srv.(StartedServiceServer).GetVersion(ctx, req.(*emptypb.Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -894,60 +825,6 @@ func _StartedService_SetGroupExpand_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
-func _StartedService_GetSystemProxyStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(emptypb.Empty)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(StartedServiceServer).GetSystemProxyStatus(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: StartedService_GetSystemProxyStatus_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(StartedServiceServer).GetSystemProxyStatus(ctx, req.(*emptypb.Empty))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _StartedService_SetSystemProxyEnabled_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SetSystemProxyEnabledRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(StartedServiceServer).SetSystemProxyEnabled(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: StartedService_SetSystemProxyEnabled_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(StartedServiceServer).SetSystemProxyEnabled(ctx, req.(*SetSystemProxyEnabledRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _StartedService_TriggerDebugCrash_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(DebugCrashRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(StartedServiceServer).TriggerDebugCrash(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: StartedService_TriggerDebugCrash_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(StartedServiceServer).TriggerDebugCrash(ctx, req.(*DebugCrashRequest))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
 func _StartedService_TriggerOOMReport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(emptypb.Empty)
 	if err := dec(in); err != nil {
@@ -1122,6 +999,24 @@ func _StartedService_SetTailscaleExitNode_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StartedService_TailscaleLogout_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TailscaleLogoutRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartedServiceServer).TailscaleLogout(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StartedService_TailscaleLogout_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartedServiceServer).TailscaleLogout(ctx, req.(*TailscaleLogoutRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _StartedService_StartTailscaleSSHSession_Handler(srv interface{}, stream grpc.ServerStream) error {
 	return srv.(StartedServiceServer).StartTailscaleSSHSession(&grpc.GenericServerStream[TailscaleSSHClientMessage, TailscaleSSHServerMessage]{ServerStream: stream})
 }
@@ -1137,12 +1032,8 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*StartedServiceServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "StopService",
-			Handler:    _StartedService_StopService_Handler,
-		},
-		{
-			MethodName: "ReloadService",
-			Handler:    _StartedService_ReloadService_Handler,
+			MethodName: "GetVersion",
+			Handler:    _StartedService_GetVersion_Handler,
 		},
 		{
 			MethodName: "GetDefaultLogLevel",
@@ -1173,18 +1064,6 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _StartedService_SetGroupExpand_Handler,
 		},
 		{
-			MethodName: "GetSystemProxyStatus",
-			Handler:    _StartedService_GetSystemProxyStatus_Handler,
-		},
-		{
-			MethodName: "SetSystemProxyEnabled",
-			Handler:    _StartedService_SetSystemProxyEnabled_Handler,
-		},
-		{
-			MethodName: "TriggerDebugCrash",
-			Handler:    _StartedService_TriggerDebugCrash_Handler,
-		},
-		{
 			MethodName: "TriggerOOMReport",
 			Handler:    _StartedService_TriggerOOMReport_Handler,
 		},
@@ -1207,6 +1086,10 @@ var StartedService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetTailscaleExitNode",
 			Handler:    _StartedService_SetTailscaleExitNode_Handler,
+		},
+		{
+			MethodName: "TailscaleLogout",
+			Handler:    _StartedService_TailscaleLogout_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

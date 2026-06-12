@@ -2,6 +2,10 @@
 icon: material/new-box
 ---
 
+!!! quote "Changes in sing-box 1.14.0"
+
+    :material-plus: [ssh_server](#ssh_server)
+
 !!! quote "Changes in sing-box 1.13.0"
 
     :material-plus: [relay_server_port](#relay_server_port)  
@@ -77,6 +81,10 @@ Indicates whether the instance should register as an Ephemeral node (https://tai
 The hostname of the node.
 
 System hostname is used by default.
+
+!!! question "Since sing-box 1.14.0"
+
+    On iOS, tvOS and Android, the device name is used by default.
 
 Example: `localhost`
 
