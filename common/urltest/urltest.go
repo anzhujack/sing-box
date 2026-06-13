@@ -32,16 +32,22 @@ var _ adapter.URLTestHistoryStorage = (*HistoryStorage)(nil)
 
 type HistoryStorage struct {
 	delayHistory sync.Map
-	updateHook   *observable.Subscriber[struct{}]
-	hookAccess   sync.Mutex
+	updateAccess sync.RWMutex
+	updateHooks  []*observable.Subscriber[struct{}]
 }
 
 func NewHistoryStorage() *HistoryStorage { return &HistoryStorage{} }
 
-func (s *HistoryStorage) SetHook(h *observable.Subscriber[struct{}]) {
-	s.hookAccess.Lock()
-	s.updateHook = h
-	s.hookAccess.Unlock()
+func (s *HistoryStorage) AddUpdateHook(hook *observable.Subscriber[struct{}]) {
+	s.updateAccess.Lock()
+	defer s.updateAccess.Unlock()
+	s.updateHooks = append(s.updateHooks, hook)
+}
+
+func (s *HistoryStorage) NotifyUpdated() {
+	s.updateAccess.RLock()
+	defer s.updateAccess.RUnlock()
+	s.notifyUpdated()
 }
 
 func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory {
@@ -57,27 +63,24 @@ func (s *HistoryStorage) LoadURLTestHistory(tag string) *adapter.URLTestHistory 
 
 func (s *HistoryStorage) DeleteURLTestHistory(tag string) {
 	s.delayHistory.Delete(tag)
-	s.notifyUpdated()
+	s.NotifyUpdated()
 }
 
 func (s *HistoryStorage) StoreURLTestHistory(tag string, h *adapter.URLTestHistory) {
 	s.delayHistory.Store(tag, h)
-	s.notifyUpdated()
+	s.NotifyUpdated()
 }
 
 func (s *HistoryStorage) notifyUpdated() {
-	s.hookAccess.Lock()
-	h := s.updateHook
-	s.hookAccess.Unlock()
-	if h != nil {
-		h.Emit(struct{}{})
+	for _, updateHook := range s.updateHooks {
+		updateHook.Emit(struct{}{})
 	}
 }
 
 func (s *HistoryStorage) Close() error {
-	s.hookAccess.Lock()
-	s.updateHook = nil
-	s.hookAccess.Unlock()
+	s.updateAccess.Lock()
+	defer s.updateAccess.Unlock()
+	s.updateHooks = nil
 	return nil
 }
 
@@ -322,10 +325,10 @@ func URLTestWithDetailAndStatus(ctx context.Context, link string, detour N.Diale
 // http.Client probe path:
 //
 //   - matcher != nil  → matcher decides; bypasses the captive-portal
-//                       and < 400 heuristic entirely.
+//     and < 400 heuristic entirely.
 //   - matcher == nil  → strict 204 on /generate_204 endpoints (so a
-//                       captive-portal login page returning 200 fails),
-//                       otherwise < 400 passes, ≥ 400 fails.
+//     captive-portal login page returning 200 fails),
+//     otherwise < 400 passes, ≥ 400 fails.
 func validateStatus(code int, linkURL *url.URL, matcher *StatusMatcher) error {
 	if matcher != nil {
 		if matcher.Match(code) {
@@ -351,11 +354,11 @@ func validateStatus(code int, linkURL *url.URL, matcher *StatusMatcher) error {
 // as atomic.Bool. After client.Do returns, every callback for THIS
 // request has either fired or never will, so the read side is safe.
 type probeTrace struct {
-	tlsStartNS   atomic.Int64
-	tlsDoneNS    atomic.Int64
-	wroteAtNS    atomic.Int64
-	firstByteNS  atomic.Int64
-	resume       atomic.Bool
+	tlsStartNS  atomic.Int64
+	tlsDoneNS   atomic.Int64
+	wroteAtNS   atomic.Int64
+	firstByteNS atomic.Int64
+	resume      atomic.Bool
 }
 
 func newProbeTrace() *probeTrace { return &probeTrace{} }

@@ -15,7 +15,10 @@ import (
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/sing/common/rw"
+	"github.com/sagernet/sing/common/x/list"
 	"github.com/sagernet/sing/service/filemanager"
+
+	"go4.org/netipx"
 )
 
 var _ adapter.RuleSet = (*LocalRuleSet)(nil)
@@ -120,12 +123,37 @@ func (s *LocalRuleSet) getPath(ctx context.Context, path string) (string, error)
 	return path, nil
 }
 
-func (s *LocalRuleSet) PostStart() error {
-	return nil
+func (s *LocalRuleSet) Metadata() adapter.RuleSetMetadata {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.metadata
+}
+
+func (s *LocalRuleSet) ExtractIPSet() []*netipx.IPSet {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return common.FlatMap(s.rules, extractIPSetFromRule)
 }
 
 func (s *LocalRuleSet) Update(ctx context.Context) error {
 	return nil
+}
+
+func (s *LocalRuleSet) PostStart() error {
+	return nil
+}
+
+func (s *LocalRuleSet) RegisterCallback(callback adapter.RuleSetUpdateCallback) *list.Element[adapter.RuleSetUpdateCallback] {
+	s.access.Lock()
+	defer s.access.Unlock()
+	return s.callbacks.PushBack(callback)
+}
+
+func (s *LocalRuleSet) UnregisterCallback(element *list.Element[adapter.RuleSetUpdateCallback]) {
+	s.access.Lock()
+	defer s.access.Unlock()
+	s.callbacks.Remove(element)
+
 }
 
 func (s *LocalRuleSet) Close() error {

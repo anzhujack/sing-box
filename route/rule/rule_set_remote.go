@@ -123,12 +123,6 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 				" — starting with empty set, will retry every ", s.updateInterval)
 		}
 	}
-	s.updateTicker = time.NewTicker(s.updateInterval)
-	return nil
-}
-
-func (s *RemoteRuleSet) PostStart() error {
-	go s.loopUpdate()
 	return nil
 }
 
@@ -175,6 +169,10 @@ func (s *RemoteRuleSet) update() {
 	} else if s.refs.Load() == 0 {
 		s.rules = nil
 	}
+}
+
+func (s *RemoteRuleSet) updateOnce() {
+	s.update()
 }
 
 func (s *RemoteRuleSet) Update(ctx context.Context) error {
@@ -374,8 +372,5 @@ func (s *RemoteRuleSet) saveCacheFile(contentRaw []byte) {
 func (s *RemoteRuleSet) Close() error {
 	s.rules = nil
 	s.cancel()
-	if s.updateTicker != nil {
-		s.updateTicker.Stop()
-	}
 	return nil
 }

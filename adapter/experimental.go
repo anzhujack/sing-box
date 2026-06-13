@@ -15,10 +15,10 @@ import (
 
 type ClashServer interface {
 	LifecycleService
-	ConnectionTracker
 	Mode() string
 	ModeList() []string
-	SetModeUpdateHook(hook *observable.Subscriber[struct{}])
+	SetMode(mode string)
+	AddModeUpdateHook(hook *observable.Subscriber[struct{}])
 	HistoryStorage() URLTestHistoryStorage
 }
 
@@ -28,11 +28,9 @@ type URLTestHistory struct {
 }
 
 type URLTestHistoryStorage interface {
-	SetHook(hook *observable.Subscriber[struct{}])
 	LoadURLTestHistory(tag string) *URLTestHistory
 	DeleteURLTestHistory(tag string)
 	StoreURLTestHistory(tag string, history *URLTestHistory)
-	Close() error
 }
 
 type V2RayServer interface {

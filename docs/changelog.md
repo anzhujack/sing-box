@@ -2,6 +2,75 @@
 icon: material/alert-decagram
 ---
 
+#### 1.14.0-alpha.31
+
+* Fixes and improvements
+
+#### 1.14.0-alpha.30
+
+* Introducing sing-box API service **1**
+* Apple/Android: Introducing remote control **2**
+* Introducing sing-box Dashboard **3**
+* Fixes and improvements
+
+**1**:
+
+The new [sing-box API service](/configuration/service/api/) is a gRPC
+server for observing and controlling the running sing-box instance,
+exposing the same interface the graphical clients use locally: service
+status, logs, outbound groups (selection and URL tests), Clash mode,
+connection tracking, and tools such as network quality tests, STUN
+tests, and Tailscale operations. The server also accepts
+[gRPC-Web](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md)
+requests, including the WebSocket transport of
+[@improbable-eng/grpc-web](https://github.com/improbable-eng/grpc-web)
+for bidirectional streaming methods, so browsers can connect directly.
+Clients authenticate via the
+[`secret`](/configuration/service/api/#secret) field; TLS and CORS
+options are available. Connection tracking and Clash mode methods
+require the [Clash API](/configuration/experimental/clash-api/) to be
+configured.
+
+**2**:
+
+The graphical clients for Apple platforms and Android can now control
+remote sing-box instances running the API service. Remote servers (URL
+and secret) are managed in settings; the dashboard, logs, connections,
+groups, and tools pages can then switch between the local service and
+remote instances.
+
+**3**:
+
+[sing-box Dashboard](https://github.com/SagerNet/sing-box-dashboard) is
+a new web client for the API service, providing almost the same
+experience as the graphical clients. A public instance is available at
+http://sing-box-dashboard.sagernet.org (shortcut: dash.sing-box.app).
+
+#### 1.14.0-alpha.29
+
+* Fixes and improvements
+
+#### 1.13.13
+
+* Fixes and improvements
+
+#### 1.14.0-alpha.27
+
+* Add Tailscale SSH server **1**
+* Fixes and improvements
+
+**1**:
+
+Adds an [`ssh_server`](/configuration/endpoint/tailscale/#ssh_server) field to
+[Tailscale](/configuration/endpoint/tailscale/) endpoints, running a Tailscale SSH
+server on tailnet port 22. Access is controlled by the SSH ACL in the Tailscale
+admin console, which maps each connection to a local user (behavior varies by
+platform; iOS and tvOS are not yet supported). The value may be `true` (equivalent
+to `{ "enabled": true }`), or an object that additionally sets
+[`disable_pty`](/configuration/endpoint/tailscale/#ssh_serverdisable_pty),
+[`disable_sftp`](/configuration/endpoint/tailscale/#ssh_serverdisable_sftp), and
+[`disable_forwarding`](/configuration/endpoint/tailscale/#ssh_serverdisable_forwarding).
+
 #### 1.14.0-alpha.26
 
 * Add gecko obfs for Hysteria2 **1**

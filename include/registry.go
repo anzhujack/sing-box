@@ -40,7 +40,7 @@ import (
 	"github.com/sagernet/sing-box/protocol/vmess"
 	providerLocal "github.com/sagernet/sing-box/provider/local"
 	"github.com/sagernet/sing-box/provider/remote"
-	api "github.com/sagernet/sing-box/service/api"
+	"github.com/sagernet/sing-box/service/api"
 	originca "github.com/sagernet/sing-box/service/origin_ca"
 	"github.com/sagernet/sing-box/service/resolved"
 	"github.com/sagernet/sing-box/service/ssmapi"

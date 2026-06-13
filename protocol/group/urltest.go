@@ -390,7 +390,6 @@ func (s *URLTest) isGroupActive() bool {
 	return time.Since(s.group.lastActive.Load()) <= s.group.idleTimeout
 }
 
-
 func (s *URLTest) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
 	s.group.Touch()
 	var outbound adapter.Outbound
@@ -587,7 +586,6 @@ func (s *URLTest) onProviderUpdated(tag string) error {
 	return nil
 }
 
-
 type URLTestGroup struct {
 	ctx                          context.Context
 	router                       adapter.Router
@@ -599,7 +597,7 @@ type URLTestGroup struct {
 	interval                     time.Duration
 	tolerance                    uint16
 	idleTimeout                  time.Duration
-	history                      adapter.URLTestHistoryStorage
+	history                      *urltest.HistoryStorage
 	checking                     atomic.Bool
 	selectedOutboundTCP          common.TypedValue[adapter.Outbound]
 	selectedOutboundUDP          common.TypedValue[adapter.Outbound]
@@ -654,13 +652,9 @@ func NewURLTestGroup(ctx context.Context, outboundManager adapter.OutboundManage
 	if interval > idleTimeout {
 		return nil, E.New("interval must be less or equal than idle_timeout")
 	}
-	var history adapter.URLTestHistoryStorage
-	if historyFromCtx := service.PtrFromContext[urltest.HistoryStorage](ctx); historyFromCtx != nil {
-		history = historyFromCtx
-	} else if clashServer := service.FromContext[adapter.ClashServer](ctx); clashServer != nil {
-		history = clashServer.HistoryStorage()
-	} else {
-		history = urltest.NewHistoryStorage()
+	history := service.PtrFromContext[urltest.HistoryStorage](ctx)
+	if history == nil {
+		return nil, E.New("missing URL test history storage")
 	}
 	group := &URLTestGroup{
 		ctx:                          ctx,
@@ -735,6 +729,7 @@ func (g *URLTestGroup) Close() error {
 //     haven't seen too many dial failures on it, give it a grace period. Avoids
 //     thrash when the test URL is temporarily blocked while traffic still works.
 //  3. Only switch when current is truly unusable (dropped from set, or marked bad).
+//
 // pinnedOutbound returns the manually-pinned outbound when it is still a
 // member of the snapshot and supports the requested network; nil otherwise.
 // When the pin has been removed from the snapshot (provider update dropped
