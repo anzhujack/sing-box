@@ -60,10 +60,16 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 		inbound = c.Metadata.InboundType
 	}
 	var domain string
-	if c.Metadata.Domain != "" {
+	if c.Metadata.Destination.Fqdn != "" {
+		domain = c.Metadata.Destination.Fqdn
+	} else if c.Metadata.Domain != "" {
 		domain = c.Metadata.Domain
 	} else {
-		domain = c.Metadata.Destination.Fqdn
+		domain = c.Metadata.SniffHost
+	}
+	var destinationAddr = c.Metadata.Destination.Addr
+	if len(c.Metadata.DestinationAddresses) > 0 {
+		destinationAddr = c.Metadata.DestinationAddresses[0]
 	}
 	var processPath string
 	if c.Metadata.ProcessInfo != nil {
@@ -94,10 +100,11 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 			"network":         c.Metadata.Network,
 			"type":            inbound,
 			"sourceIP":        c.Metadata.Source.Addr,
-			"destinationIP":   c.Metadata.Destination.Addr,
+			"destinationIP":   destinationAddr,
 			"sourcePort":      F.ToString(c.Metadata.Source.Port),
 			"destinationPort": F.ToString(c.Metadata.Destination.Port),
 			"host":            domain,
+			"sniffHost":       c.Metadata.SniffHost,
 			"dnsMode":         "normal",
 			"processPath":     processPath,
 		},
