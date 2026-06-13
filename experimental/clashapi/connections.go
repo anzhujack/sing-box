@@ -60,10 +60,10 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 		inbound = c.Metadata.InboundType
 	}
 	var domain string
-	if c.Metadata.Destination.Fqdn != "" {
-		domain = c.Metadata.Destination.Fqdn
-	} else if c.Metadata.Domain != "" {
+	if c.Metadata.Domain != "" {
 		domain = c.Metadata.Domain
+	} else if c.Metadata.Destination.Fqdn != "" {
+		domain = c.Metadata.Destination.Fqdn
 	} else {
 		domain = c.Metadata.SniffHost
 	}
@@ -212,9 +212,20 @@ func smartBlockConnection(ctx context.Context, trafficManager *trafficcontrol.Ma
 		target := targetConn.Metadata()
 		targetConn.Close()
 
-		// Walk the chain looking for a Smart group. The slot immediately after
-		// the Smart tag in the chain is the actual node it selected.
-		chain := target.Metadata.GetRealOutboundChain()
+		// Prefer the per-connection chain captured by the tracker. It is
+		// serialized terminal-to-root for Clash UI display, so for
+		// [..., node, smart, parent] the Smart-selected node is the
+		// previous slot. RealOutboundChain is still checked for older
+		// fork paths that explicitly recorded [smart, node].
+		type chainCandidate struct {
+			chain      []string
+			nodeOffset int
+		}
+		chains := []chainCandidate{
+			{chain: target.Metadata.GetRealOutboundChain(), nodeOffset: 1},
+			{chain: target.Chain, nodeOffset: -1},
+			{chain: target.Chain, nodeOffset: 1},
+		}
 		outboundMgr := service.FromContext[adapter.OutboundManager](ctx)
 		if outboundMgr == nil {
 			render.NoContent(w, r)
@@ -224,30 +235,37 @@ func smartBlockConnection(ctx context.Context, trafficManager *trafficcontrol.Ma
 			Group string `json:"group,omitempty"`
 			Node  string `json:"node,omitempty"`
 		}
-		for i, tag := range chain {
-			ob, ok := outboundMgr.Outbound(tag)
-			if !ok {
-				continue
-			}
-			sg, ok := ob.(*group.Smart)
-			if !ok {
-				continue
-			}
-			nodeTag := ""
-			if i+1 < len(chain) {
-				nodeTag = chain[i+1]
-			}
-			if nodeTag == "" {
-				nodeTag = sg.Now()
-			}
-			if nodeTag == "" {
+		for _, candidate := range chains {
+			chain := candidate.chain
+			for i, tag := range chain {
+				ob, ok := outboundMgr.Outbound(tag)
+				if !ok {
+					continue
+				}
+				sg, ok := ob.(*group.Smart)
+				if !ok {
+					continue
+				}
+				nodeTag := ""
+				nodeIndex := i + candidate.nodeOffset
+				if nodeIndex >= 0 && nodeIndex < len(chain) {
+					nodeTag = chain[nodeIndex]
+				}
+				if nodeTag == "" || nodeTag == tag {
+					nodeTag = sg.Now()
+				}
+				if nodeTag == "" {
+					break
+				}
+				if err := sg.MarkBlocked(nodeTag, group.DefaultBlockDuration); err == nil {
+					blocked.Group = tag
+					blocked.Node = nodeTag
+				}
 				break
 			}
-			if err := sg.MarkBlocked(nodeTag, group.DefaultBlockDuration); err == nil {
-				blocked.Group = tag
-				blocked.Node = nodeTag
+			if blocked.Group != "" {
+				break
 			}
-			break
 		}
 
 		render.JSON(w, r, blocked)
