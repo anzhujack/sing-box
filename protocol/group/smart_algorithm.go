@@ -239,6 +239,24 @@ func (s *Smart) http3FallbackCount(tag string) int32 {
 	return 0
 }
 
+func (s *Smart) HTTP3FallbackNodeCount() int {
+	if s == nil {
+		return 0
+	}
+	m := s.nodeHTTP3Fallbacks.Load()
+	if m == nil {
+		return 0
+	}
+	count := 0
+	m.Range(func(_ string, v *atomic.Int32) bool {
+		if v.Load() > 0 {
+			count++
+		}
+		return true
+	})
+	return count
+}
+
 // nodeLoadCounter is the global "active connections per node tag"
 // counter consulted by the least-loaded algorithm. xsync.MapOf gives
 // us zero-alloc atomic increments without a fat lock.
@@ -451,10 +469,10 @@ func (s *Smart) rememberStickyChoice(target, node string, isUDP bool) {
 //  3. 用户未手动 pin（pin 路径有自己的语义，让完整决策处理）。
 //  4. stickyByTarget 里有 (target, isUDP) 对应的 wantTag 记录。
 //  5. wantTag 对应的节点:
-//       - 仍在当前 snapshot 的节点池里（provider 可能刷新过）
-//       - isAlive = true（breaker 未 trip + 非 knownDead + 有新鲜 urltest 历史）
-//       - 若请求是 UDP，该节点需 supportsUDP
-//       - 未被 isTargetSuspicious 标记（该 target 在该节点上近期失败率高）
+//     - 仍在当前 snapshot 的节点池里（provider 可能刷新过）
+//     - isAlive = true（breaker 未 trip + 非 knownDead + 有新鲜 urltest 历史）
+//     - 若请求是 UDP，该节点需 supportsUDP
+//     - 未被 isTargetSuspicious 标记（该 target 在该节点上近期失败率高）
 //
 // 性能: 所有检查都是 O(1) 或 O(池子大小) 的 slice 遍历（找 ob by tag）。
 // O(池子大小) 的部分最多 1 次，远比完整决策路径的 O(N·log N)+ store I/O 省。

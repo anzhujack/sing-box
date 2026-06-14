@@ -23,10 +23,10 @@ import (
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/interrupt"
 	"github.com/sagernet/sing-box/common/smart"
-	"github.com/sagernet/sing-box/common/urltest"
 	"github.com/sagernet/sing-box/common/smart/lightgbm"
-	smartservice "github.com/sagernet/sing-box/experimental/smart"
+	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	smartservice "github.com/sagernet/sing-box/experimental/smart"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -207,8 +207,8 @@ type priorityRule struct {
 // Smart is the Smart outbound group — history-weighted, parallel-race, ASN-aware.
 type Smart struct {
 	outbound.Adapter
-	ctx        context.Context
-	router     adapter.Router
+	ctx         context.Context
+	router      adapter.Router
 	outboundMgr adapter.OutboundManager
 	connection  adapter.ConnectionManager
 	logger      log.ContextLogger
@@ -218,24 +218,24 @@ type Smart struct {
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
 
-	testURL            string
+	testURL string
 	// expectedStatus: mihomo 对齐的状态码 matcher，nil = 旧启发式。
 	// NewSmart 时解析，probe 链路透传给 urltest.URLTestWithDetailAndStatus。
-	expectedStatus     *urltest.StatusMatcher
-	interval           time.Duration
-	disableUDP         bool
-	policyPriority     []priorityRule
+	expectedStatus *urltest.StatusMatcher
+	interval       time.Duration
+	disableUDP     bool
+	policyPriority []priorityRule
 	// priorityFactorCache memoises getPriorityFactor(tag) so the dial
 	// hot path doesn't re-walk the rule slice for every selection. The
 	// node tag set is effectively static — cache size grows to ≤
 	// |snap.tags|. Lazily allocated by parsePolicyPriority when at
 	// least one rule survives parsing.
 	priorityFactorCache *xsync.MapOf[string, float64]
-	useASN             bool
-	asnDBPaths         []string            // per-group configured paths; empty → fall back to geox service
-	asnDBs             []*maxminddb.Reader // multi-source: tried in order until one returns a hit
-	countryDB          *maxminddb.Reader   // country.mmdb from GeoX, optional
-	maxHostFailedTimes int                 // mihomo parity; 0 = default 10
+	useASN              bool
+	asnDBPaths          []string            // per-group configured paths; empty → fall back to geox service
+	asnDBs              []*maxminddb.Reader // multi-source: tried in order until one returns a hit
+	countryDB           *maxminddb.Reader   // country.mmdb from GeoX, optional
+	maxHostFailedTimes  int                 // mihomo parity; 0 = default 10
 
 	store *smart.Store
 
@@ -336,6 +336,40 @@ type Smart struct {
 	// misleading. aliveAt is the Smart-internal signal; URLTestHistory
 	// stays populated ONLY by real timed probes.
 	aliveAt *xsync.MapOf[string, int64]
+
+	// probeBackoff carries per-node exponential-backoff state for the
+	// health-check probe scheduler. A node that keeps failing its probe
+	// is not worth re-testing every `interval` — each retry wakes the
+	// device radio for a 5 s TLS budget that produces no new signal. The
+	// backoff stretches the inter-probe gap geometrically (interval → 2×
+	// → 4× … capped) so dead nodes cost the battery less while a single
+	// success instantly resets them. Lock-free reads on the dispatch path.
+	probeBackoff *xsync.MapOf[string, *probeBackoffState]
+
+	// lastRankingComputeAt is the unix-nano timestamp of the last FULL
+	// ranking recompute (the bbolt-scanning GetNodeWeightRanking path).
+	// On large subscriptions the scheduled 1-min cadence is wasteful —
+	// the ranking barely moves minute-to-minute but each recompute walks
+	// the whole stats table. We stretch the minimum gap as N grows (see
+	// rankingMinInterval) and gate on this stamp. 0 = never computed.
+	lastRankingComputeAt atomic.Int64
+
+	// healthCheckCursor is a monotonically-incrementing rotation offset
+	// for the NON-priority tail of nodes in runHealthCheck. When the node
+	// count exceeds the per-round probe budget, each tick probes a
+	// different slice of the tail so every node still gets covered across
+	// a few rounds without dispatching O(N) probes in a single tick — the
+	// primary CPU/radio heat source on large (300+ node) subscriptions.
+	healthCheckCursor atomic.Int64
+
+	// hasDegraded gates the periodic recovery-check. It starts true so the
+	// first run always performs a full reconciliation (covering states
+	// hydrated from bbolt across a restart). A degrade/block write sets it
+	// true; a recovery-check that finds NOTHING still degraded or blocked
+	// clears it, after which subsequent ticks short-circuit in O(1)
+	// instead of scanning + unmarshalling the whole node-state table. The
+	// common steady state (no degraded nodes) thus costs nothing.
+	hasDegraded atomic.Bool
 
 	// countryDBRetryAt throttles re-opening country.mmdb when the GeoX
 	// download finishes after PostStart (first open was a no-op because
@@ -545,17 +579,17 @@ func NewSmart(ctx context.Context, router adapter.Router, logger log.ContextLogg
 	}
 
 	s := &Smart{
-		Adapter: outbound.NewAdapter(C.TypeSmart, tag, networks, options.Outbounds),
-		ctx:     ctx,
-		router:  router,
+		Adapter:     outbound.NewAdapter(C.TypeSmart, tag, networks, options.Outbounds),
+		ctx:         ctx,
+		router:      router,
 		outboundMgr: service.FromContext[adapter.OutboundManager](ctx),
 		connection:  service.FromContext[adapter.ConnectionManager](ctx),
-		logger:  logger,
+		logger:      logger,
 
 		interruptExternalConnections: options.InterruptExistConnections,
 
-		testURL:    options.URL,
-		interval:   time.Duration(options.Interval),
+		testURL:  options.URL,
+		interval: time.Duration(options.Interval),
 		// expectedStatus 在下面解析后赋值；options.ExpectedStatus 写错立即报错。
 		disableUDP: options.DisableUDP,
 		useASN:     options.UseASN,
@@ -582,8 +616,12 @@ func NewSmart(ctx context.Context, router adapter.Router, logger log.ContextLogg
 		targetDebargo:      xsync.NewMapOf[string, time.Time](),
 		breakers:           xsync.NewMapOf[string, *circuitBreakerState](),
 		aliveAt:            xsync.NewMapOf[string, int64](),
+		probeBackoff:       xsync.NewMapOf[string, *probeBackoffState](),
 		groupOrdinal:       nextGroupOrdinal(),
 	}
+	// Start with the recovery gate open so the first scheduled run performs
+	// a full reconciliation of any node states restored from bbolt.
+	s.hasDegraded.Store(true)
 	if s.maxHostFailedTimes <= 0 {
 		s.maxHostFailedTimes = 10
 	}
@@ -728,8 +766,9 @@ func (s *Smart) PostStart() error {
 			}
 		}
 		if len(paths) == 0 {
-			s.logger.Warn("smart: use_asn is true but no ASN database resolved (set asn_database or experimental.geox.url.asn); ASN features disabled")
-		} else {
+			s.logger.Warn("smart: use_asn is true but no ASN database configured; set asn_database or experimental.geox.url.asn to enable ASN features")
+		}
+		if len(paths) > 0 {
 			for _, p := range paths {
 				db, err := getSharedMMDB(p)
 				if err != nil {
@@ -748,11 +787,18 @@ func (s *Smart) PostStart() error {
 	// Optional country mmdb — feeds ModelInput.DestGeoIP (LightGBM features
 	// 17 and 26). When the GeoX service has downloaded country.mmdb we use
 	// it; otherwise DestGeoIP stays nil and those features fall back to 0.
-	if geoSvc := service.FromContext[adapter.GeoXService](s.ctx); geoSvc != nil {
-		if mmdbPath := geoSvc.MMDBPath(); mmdbPath != "" {
+	{
+		mmdbPath := ""
+		if geoSvc := service.FromContext[adapter.GeoXService](s.ctx); geoSvc != nil {
+			mmdbPath = geoSvc.MMDBPath()
+		}
+		if mmdbPath == "" {
+			s.logger.Debug("smart: country mmdb not configured; DestGeoIP LightGBM features disabled")
+		}
+		if mmdbPath != "" {
 			if db, err := getSharedMMDB(mmdbPath); err == nil {
 				s.countryDB = db
-				s.logger.Info("smart: country mmdb loaded from ", mmdbPath, " (shared via mmdbPool)")
+				s.logger.Info("smart: country mmdb loaded from ", mmdbPath)
 			} else {
 				s.logger.Debug("smart: country mmdb not yet available: ", err)
 			}
@@ -1269,14 +1315,14 @@ func (s *Smart) publishRankingSnapshot(ranking []smart.NodeRank) {
 // what the source-of-truth bbolt table actually contains.
 func (s *Smart) DiagnosticSnapshot() map[string]any {
 	out := map[string]any{
-		"name":             s.Tag(),
-		"algorithm":        s.CurrentAlgorithm(),
-		"hysteresis":       s.HysteresisDuration().String(),
-		"policy_priority":  s.PolicyPriorityRules(),
-		"members":          len(s.All()),
-		"now":              s.Now(),
-		"fixed":            s.Selected(),
-		"test_url":         s.TestURL(),
+		"name":            s.Tag(),
+		"algorithm":       s.CurrentAlgorithm(),
+		"hysteresis":      s.HysteresisDuration().String(),
+		"policy_priority": s.PolicyPriorityRules(),
+		"members":         len(s.All()),
+		"now":             s.Now(),
+		"fixed":           s.Selected(),
+		"test_url":        s.TestURL(),
 	}
 
 	// Snapshot age — hint for which tier serves the next /weights call.
@@ -1298,8 +1344,8 @@ func (s *Smart) DiagnosticSnapshot() map[string]any {
 			perNode := make(map[string]map[string]int, len(realTC))
 			for tag, tc := range realTC {
 				perNode[tag] = map[string]int{
-					"target_count":   tc,
-					"sample_count":   realSC[tag],
+					"target_count": tc,
+					"sample_count": realSC[tag],
 				}
 			}
 			out["live_coverage"] = perNode
@@ -1593,19 +1639,19 @@ type ClearSelectionResult struct {
 // the group keeps feeling pinned:
 //
 //  1. Clear manualSelected            — obvious, without it SelectOutbound
-//                                       keeps short-circuiting to the pin.
+//     keeps short-circuiting to the pin.
 //  2. Reset lastSelectedTag           — Now() surfaced the old pin as the
-//                                       "current" node until the next dial.
+//     "current" node until the next dial.
 //  3. Drop unwrap cache for this grp  — the unwrap LRU held (target → pin)
-//                                       mappings, so subsequent dials
-//                                       bypassed fresh selection.
+//     mappings, so subsequent dials
+//     bypassed fresh selection.
 //  4. Interrupt active connections    — existing conns routed via the pin
-//                                       would keep flowing through it
-//                                       forever; parity with Selector's
-//                                       SelectOutbound → Interrupt path.
+//     would keep flowing through it
+//     forever; parity with Selector's
+//     SelectOutbound → Interrupt path.
 //  5. Async RunPrefetch + ranking     — kick the ranking pipeline so the
-//                                       next dial already sees fresh
-//                                       weights instead of delay-fallback.
+//     next dial already sees fresh
+//     weights instead of delay-fallback.
 //
 // Returns a summary of what changed. Always succeeds (a Smart group always
 // accepts an unpin operation, even if no pin was active).
@@ -1699,6 +1745,9 @@ func (s *Smart) MarkBlocked(nodeTag string, duration time.Duration) error {
 		Node:   nodeTag,
 		Data:   data,
 	})
+	// Reopen the recovery gate so the cooldown is reconciled (unblocked)
+	// by a future recovery-check tick.
+	s.hasDegraded.Store(true)
 	smart.ClearBlockedNodesCache(s.Tag(), smartConfigName)
 
 	// Also drop any unwrap-cache entries that might still point at this node.
@@ -2340,8 +2389,9 @@ func (s *Smart) racePacketCandidates(
 //   - "prefetch" : periodically pre-computed best-node list
 //   - "weight"   : realtime computation from the weight store
 //   - "delay"    : URLTest-latency-based ordering (cold-start fallback so we
-//                  still bias toward fast nodes before any stats accumulate)
+//     still bias toward fast nodes before any stats accumulate)
 //   - "fallback" : no signal at all; random pick filtered by alive/blocked
+//
 // selectProxiesTraced's bypassManualPin parameter asks the function to
 // skip the manual-pin short-circuit and fall through to the normal
 // tier logic (unwrap / prefetch / weight / delay / fallback). Used by
@@ -3141,8 +3191,8 @@ func (s *Smart) parallelDial(ctx context.Context, network string, dest M.Socksad
 
 // hedgedDial 对 outbounds 执行 "错时竞速 (staggered race)"：
 //
-//   primary (index 0) 立刻起飞，backup (index 1..) 被延后 smartHedgedDelay
-//   再起飞。先完成任何一个节点的 dial 即获胜，其余 ctx 取消。
+//	primary (index 0) 立刻起飞，backup (index 1..) 被延后 smartHedgedDelay
+//	再起飞。先完成任何一个节点的 dial 即获胜，其余 ctx 取消。
 //
 // 与 parallelDial 的区别：并行 race 所有 arm 都立刻发车，会双倍消耗
 // 上行带宽/SYN 表/远端连接数；hedged dial 默认只打一条连接，仅在
@@ -3299,11 +3349,11 @@ type smartTrackedConn struct {
 
 	// first-byte tracking
 	currentFirstByteTimeout time.Duration
-	firstReadOnce  atomic.Bool
-	firstReadMs    atomic.Int64   // latency in ms from dial-success
-	firstReadErr   atomic.Pointer[error]
-	firstWriteOnce atomic.Bool
-	firstWriteErr  atomic.Pointer[error]
+	firstReadOnce           atomic.Bool
+	firstReadMs             atomic.Int64 // latency in ms from dial-success
+	firstReadErr            atomic.Pointer[error]
+	firstWriteOnce          atomic.Bool
+	firstWriteErr           atomic.Pointer[error]
 
 	// lastIOErr is the most recent non-nil error observed on Read or
 	// Write, regardless of whether the conn had already produced bytes.
@@ -3334,12 +3384,12 @@ type smartTrackedConn struct {
 	watchdogTriggered atomic.Bool
 
 	// peak byte-rate tracking (sampled on each IO call)
-	rateMu        sync.Mutex
-	rateLastTime  time.Time
-	rateLastUp    int64
-	rateLastDown  int64
-	maxUpBps      atomic.Int64
-	maxDownBps    atomic.Int64
+	rateMu       sync.Mutex
+	rateLastTime time.Time
+	rateLastUp   int64
+	rateLastDown int64
+	maxUpBps     atomic.Int64
+	maxDownBps   atomic.Int64
 	// nextSampleNS is a lock-free short-circuit for sampleRate: it stores
 	// the earliest unix-nano at which a new sample should be taken
 	// (rateLastTime + 1s). Every Read/Write compares time.Now() against
@@ -4021,10 +4071,10 @@ func (s *Smart) recordStats(
 		return
 	}
 
-	// Hot-patch ML features for domain-only requests (e.g. AsIs strategy where 
+	// Hot-patch ML features for domain-only requests (e.g. AsIs strategy where
 	// IP resolution is deferred to the remote endpoint).
 	// Without this, LightGBM features 16 (ASN) and 17 (GeoIP) are zero-filled.
-	// Since recordStats runs post-connection, we can afford a tiny 200ms 
+	// Since recordStats runs post-connection, we can afford a tiny 200ms
 	// lookup block to drastically improve ML model accuracy and CSV collection.
 	if len(meta.resolvedIPs) == 0 && meta.host != "" && (s.useASN || s.useLightGBM || s.collectData) {
 		if dnsRouter := service.FromContext[adapter.DNSRouter](s.ctx); dnsRouter != nil {
@@ -4223,7 +4273,17 @@ func (s *Smart) recordStats(
 	var mlPredicted bool
 	if s.useLightGBM && s.weightModel != nil && s.weightModel.IsLoaded() {
 		var conf float64
-		calculatedWeight, mlPredicted, conf = s.weightModel.PredictWeight(input, priorityFactor)
+		// Memoise inference by (node|target|proto): on a busy group the
+		// same pair closes many connections per second with a near-static
+		// feature vector, and the tree walk was a top CPU cost at high
+		// QPS. priorityFactor is applied AFTER the cache lookup so per-dial
+		// pin/priority boosts still compose on the cached base prediction.
+		predKey := proxyTag + "|" + target
+		if meta.isUDP {
+			predKey += "|u"
+		}
+		calculatedWeight, mlPredicted, conf = s.weightModel.PredictWeightCached(
+			input, priorityFactor, predKey, lightgbmPredCacheTTL)
 		// Surface inter-tree agreement to strategies (and the v2 collector
 		// CSV) so downstream code can decide whether to trust this weight.
 		input.LightGBMConfidence = conf
@@ -4462,6 +4522,9 @@ func (s *Smart) handleFailedConnection(proxyName string, oldWeight, calculatedWe
 			Node:   proxyName,
 			Data:   data,
 		})
+		// Reopen the recovery gate: a degraded/blocked state now exists
+		// and must be reconciled by a future recovery-check tick.
+		s.hasDegraded.Store(true)
 	}
 
 	if block {
@@ -4536,6 +4599,106 @@ func (s *Smart) updatePrefetchCache(meta *smartDialMeta, target, nodeName string
 //   - 1-second freshness cache short-circuits back-to-back identical
 //     probes even across sequential calls (singleflight only dedupes
 //     concurrent in-flight requests).
+//
+// Health-check probe-scheduler tunables. These bound the per-tick probe
+// dispatch so a large subscription stays cool: instead of O(N) TLS probes
+// every interval, we always probe the few nodes that matter (priority) and
+// rotate through the rest a budgeted slice at a time.
+const (
+	// healthCheckPriorityNodes is how many top-ranked nodes are probed on
+	// EVERY tick. These are the nodes selection actually draws from, so
+	// their liveness must stay fresh; the long tail can lag a few rounds.
+	healthCheckPriorityNodes = 16
+
+	// healthCheckTailBudgetMin / Divisor size the rotating tail window.
+	// Budget = max(Min, ceil(N / Divisor)) so small groups still probe
+	// everyone each tick (no behaviour change for the common <40-node
+	// case) while a 300-node group probes ~30 tail nodes per tick and
+	// covers the whole tail over ~10 rounds.
+	healthCheckTailBudgetMin = 24
+	healthCheckTailDivisor   = 10
+
+	// probeBackoffBase / Max bound the exponential cooldown applied to a
+	// node after consecutive probe failures: gap = Base × 2^(fails-1),
+	// clamped to Max. A single success clears the state entirely.
+	probeBackoffBase = 3 * time.Minute
+	probeBackoffMax  = 1 * time.Hour
+
+	// lightgbmPredCacheTTL is how long a memoised LightGBM inference stays
+	// valid. Short enough that feature drift is immaterial, long enough to
+	// collapse a high-QPS burst of closes to the same (node, target) into
+	// a single tree walk.
+	lightgbmPredCacheTTL = 30 * time.Second
+)
+
+// probeBackoffState tracks consecutive probe failures and the unix-nano
+// timestamp before which the node should not be re-probed. Fields are
+// atomic so overlapping health-check ticks (and 32-bit Android, where a
+// plain int64 read can tear) stay race-free without a per-entry mutex.
+type probeBackoffState struct {
+	failures   atomic.Int32
+	eligibleAt atomic.Int64 // unix-nano; 0 = eligible now
+}
+
+// topRankedSet returns the tags of the top-n nodes from the most recent
+// ranking snapshot, as a set for O(1) membership tests. Empty when no
+// ranking has been computed yet (cold start) — callers treat that as
+// "no priority nodes", which routes everything through the rotating tail.
+func (s *Smart) topRankedSet(n int) map[string]struct{} {
+	snap := s.rankingSnapshot.Load()
+	if snap == nil || len(snap.ranking) == 0 {
+		return nil
+	}
+	if n > len(snap.ranking) {
+		n = len(snap.ranking)
+	}
+	set := make(map[string]struct{}, n)
+	for i := 0; i < n; i++ {
+		set[snap.ranking[i].Name] = struct{}{}
+	}
+	return set
+}
+
+// healthCheckTailBudget returns how many tail (non-priority) nodes to
+// probe this tick given the total node count.
+func healthCheckTailBudget(total int) int {
+	budget := (total + healthCheckTailDivisor - 1) / healthCheckTailDivisor
+	if budget < healthCheckTailBudgetMin {
+		budget = healthCheckTailBudgetMin
+	}
+	return budget
+}
+
+// probeEligible reports whether the node may be probed now, i.e. it is not
+// inside an active exponential-backoff cooldown.
+func (s *Smart) probeEligible(tag string, nowNS int64) bool {
+	st, ok := s.probeBackoff.Load(tag)
+	if !ok {
+		return true
+	}
+	return nowNS >= st.eligibleAt.Load()
+}
+
+// probeBackoffFail records a probe failure and stretches the node's next
+// eligible time geometrically. Compute-and-swap keeps it lock-free.
+func (s *Smart) probeBackoffFail(tag string) {
+	st, _ := s.probeBackoff.LoadOrStore(tag, &probeBackoffState{})
+	fails := st.failures.Add(1)
+	gap := probeBackoffMax
+	if fails-1 < 32 { // guard shift overflow on int64 duration
+		if g := probeBackoffBase << (fails - 1); g > 0 && g < probeBackoffMax {
+			gap = g
+		}
+	}
+	st.eligibleAt.Store(time.Now().Add(gap).UnixNano())
+}
+
+// probeBackoffReset clears backoff after a successful probe so the node
+// returns to the base cadence immediately.
+func (s *Smart) probeBackoffReset(tag string) {
+	s.probeBackoff.Delete(tag)
+}
+
 func (s *Smart) runHealthCheck() {
 	if s.history == nil {
 		return
@@ -4590,6 +4753,19 @@ func (s *Smart) runHealthCheck() {
 	}
 	freshWindowNS := int64(freshWindow)
 	nowNS := time.Now().UnixNano()
+
+	// Priority set: the top-ranked nodes decide routing quality, so they
+	// are probed EVERY round regardless of the per-round budget. The tail
+	// (everything else) is covered by a rotating window so a 300-node
+	// group never dispatches 300 TLS handshakes in one tick. nil/empty
+	// ranking (cold start) → priorityCount is 0 and every node flows
+	// through the rotating tail, which is the correct bootstrap behaviour.
+	prioritySet := s.topRankedSet(healthCheckPriorityNodes)
+
+	// Phase 1: collect probe-eligible nodes, split into priority vs tail.
+	// "Eligible" = not a skipped type, not fresh (dial heartbeat or recent
+	// probe), and not currently inside its exponential-backoff window.
+	var priority, tail []adapter.Outbound
 	for _, ob := range snap.outbounds {
 		ob := ob
 		tag := ob.Tag()
@@ -4610,7 +4786,41 @@ func (s *Smart) runHealthCheck() {
 			}
 			continue
 		}
+		// Exponential backoff: a node that keeps failing is not eligible
+		// until its (geometrically growing) cooldown elapses. Priority
+		// nodes honour backoff too — a top-ranked node that just died
+		// should not be hammered every tick either.
+		if !s.probeEligible(tag, nowNS) {
+			skipped.Add(1)
+			continue
+		}
+		if _, ok := prioritySet[tag]; ok {
+			priority = append(priority, ob)
+		} else {
+			tail = append(tail, ob)
+		}
+	}
 
+	// Phase 2: budget the tail. Priority nodes always run; the tail gets
+	// a rotating slice sized so total dispatch stays bounded as N grows.
+	budget := healthCheckTailBudget(len(snap.outbounds))
+	if len(tail) > budget {
+		// Rotate the window each tick so every tail node is eventually
+		// covered. The cursor advances by exactly the slice we serve so
+		// successive ticks walk the whole tail with no gaps or overlaps.
+		off := int(s.healthCheckCursor.Add(int64(budget))-int64(budget)) % len(tail)
+		if off < 0 {
+			off += len(tail)
+		}
+		rotated := make([]adapter.Outbound, 0, budget)
+		for i := 0; i < budget; i++ {
+			rotated = append(rotated, tail[(off+i)%len(tail)])
+		}
+		tail = rotated
+	}
+
+	dispatch := func(ob adapter.Outbound) {
+		tag := ob.Tag()
 		dispatched.Add(1)
 		worker.submit(func() {
 			probeCtx, probeCancel := context.WithTimeout(ctx, 5*time.Second)
@@ -4620,6 +4830,7 @@ func (s *Smart) runHealthCheck() {
 			if err != nil || delay == 0 {
 				s.history.DeleteURLTestHistory(tag)
 				s.markDead(tag)
+				s.probeBackoffFail(tag) // stretch this node's next probe gap
 				dead.Add(1)
 				return
 			}
@@ -4628,8 +4839,15 @@ func (s *Smart) runHealthCheck() {
 				Delay: delay,
 			})
 			s.markAlive(tag)
+			s.probeBackoffReset(tag) // success → back to base cadence
 			alive.Add(1)
 		})
+	}
+	for _, ob := range priority {
+		dispatch(ob)
+	}
+	for _, ob := range tail {
+		dispatch(ob)
 	}
 	// Fire-and-forget: NO wg.Wait here. The previous wg.Wait caused
 	// a fatal ants.Pool deadlock during Wi-Fi ↔ cellular handoff
@@ -4703,6 +4921,28 @@ func (s *Smart) cleanupOrphanedGroups() {
 		" orphaned group(s): ", proxyTagsPreviewStrings(orphaned, 5))
 }
 
+// rankingMinInterval returns the minimum gap between full ranking
+// recomputes for a group with n nodes. Small groups recompute at the
+// scheduled 1-min cadence; the gap scales up with size so very large
+// subscriptions don't burn CPU re-scanning a near-stationary ranking.
+//
+//	n ≤ 100  → 1 min   (unchanged)
+//	n ≤ 250  → 3 min
+//	n ≤ 500  → 5 min
+//	n > 500  → 10 min
+func rankingMinInterval(n int) time.Duration {
+	switch {
+	case n <= 100:
+		return time.Minute
+	case n <= 250:
+		return 3 * time.Minute
+	case n <= 500:
+		return 5 * time.Minute
+	default:
+		return 10 * time.Minute
+	}
+}
+
 func (s *Smart) updateNodeRanking() {
 	if s.store == nil {
 		return
@@ -4713,6 +4953,22 @@ func (s *Smart) updateNodeRanking() {
 	}
 
 	tags := snap.tags
+
+	// Adaptive throttle: the scheduled cadence is 1 min, but on a large
+	// node set a full recompute (GetNodeWeightRanking → bbolt scan) is
+	// expensive and the ranking is near-stationary between ticks. Stretch
+	// the minimum gap with N so a 300-node group recomputes every ~5 min
+	// instead of every minute. Small groups keep the 1-min behaviour. The
+	// snapshot/cache fast-paths below still serve /weights instantly; this
+	// only rate-limits the heavy recompute. forceRefresh callers (flush,
+	// first-dial kick) bypass via RecomputeWeights, which calls the store
+	// path directly, so interactive freshness is unaffected.
+	if minGap := rankingMinInterval(len(tags)); minGap > time.Minute {
+		last := s.lastRankingComputeAt.Load()
+		if last != 0 && time.Since(time.Unix(0, last)) < minGap {
+			return
+		}
+	}
 
 	// mihomo-parity shortcut: skip ranking recompute when we already have
 	// a recent cache that covers every current proxy and contains no dead
@@ -4749,6 +5005,7 @@ func (s *Smart) updateNodeRanking() {
 	}
 
 	start := time.Now()
+	s.lastRankingComputeAt.Store(start.UnixNano())
 	ranking, err := s.store.GetNodeWeightRanking(s.Tag(), smartConfigName, s.testURL, s.isAlive, tags)
 	if err != nil {
 		s.logger.Debug("smart[", s.Tag(), "] ranking update failed: ", err)
@@ -4839,11 +5096,19 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 	if s.store == nil {
 		return
 	}
+	// O(1) gate: when no node is degraded or blocked there is nothing to
+	// recover, so skip the bbolt scan + per-node unmarshal entirely. The
+	// gate is reopened by any degrade/block write (markDegradedGate) and
+	// closed below once a full pass confirms nothing remains active.
+	if !s.hasDegraded.Load() {
+		return
+	}
 	stateData, err := s.store.GetNodeStates(s.Tag(), smartConfigName)
 	if err != nil {
 		return
 	}
 	if len(stateData) == 0 {
+		s.hasDegraded.Store(false)
 		return
 	}
 
@@ -4864,6 +5129,10 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 		opsMu                               sync.Mutex
 		ops                                 []smart.StoreOperation
 		unblocked, recovered, stillDegraded atomic.Int32
+		// anyActive counts node states that remain degraded or blocked
+		// after this pass. When it ends at zero, the recovery gate closes
+		// and future ticks skip the scan until the next degrade/block.
+		anyActive atomic.Int32
 	)
 
 	const recoveryParallel = 8 // 够 Android 4-8 核 + 有轻量等待窗口
@@ -4906,6 +5175,12 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 				updated = true
 			}
 
+			// Still-active = remains degraded, or blocked with a future
+			// cooldown that a later tick must clear. Keeps the gate open.
+			if state.Degraded || state.BlockedUntil > now {
+				anyActive.Add(1)
+			}
+
 			if !updated {
 				return
 			}
@@ -4926,6 +5201,13 @@ func (s *Smart) checkAndRecoverDegradedNodes() {
 		}()
 	}
 	wg.Wait()
+
+	// Close the gate when nothing remains degraded or blocked — the next
+	// degrade/block write reopens it. This makes the steady state (all
+	// healthy) a true O(1) no-op for every subsequent tick.
+	if anyActive.Load() == 0 {
+		s.hasDegraded.Store(false)
+	}
 
 	if len(ops) > 0 {
 		s.store.AppendToGlobalQueue(ops...)
@@ -5264,7 +5546,7 @@ func (s *Smart) markDead(tag string) {
 const targetDebargoTTL = 10 * time.Minute
 
 // markDeadForTarget soft-breaks a proxy node for a specific target.
-// Used when a node is globally healthy but fails to dial or stalls out 
+// Used when a node is globally healthy but fails to dial or stalls out
 // on a specific target (e.g. SNI blocking or IP ban).
 func (s *Smart) markDeadForTarget(target, proxyTag string) {
 	if target == "" || proxyTag == "" {
@@ -5403,6 +5685,28 @@ func (s *Smart) pruneStaleMemoryMaps() {
 		s.logger.Debug("smart[", s.Tag(), "] memory-map prune: knownDead=", kd,
 			" targetDebargo=", td, " shortLife=", sl,
 			" stickyByTarget=", st, " hysteresisMemo=", hy)
+	}
+
+	// LightGBM inference memo: drop entries for (node, target) pairs that
+	// have gone quiet so the cache can't accumulate stale tags. 4×TTL is
+	// well past any in-flight reuse window.
+	if s.weightModel != nil {
+		s.weightModel.PrunePredCache(4 * lightgbmPredCacheTTL)
+	}
+
+	// probeBackoff: drop only STALE entries — eligible for longer than
+	// probeBackoffMax, meaning the node has neither been re-probed nor
+	// removed in a full max-cooldown window (almost certainly gone from
+	// the snapshot). Entries still in cooldown, or recently eligible,
+	// are kept so a persistently-failing node's escalation isn't reset.
+	if s.probeBackoff != nil {
+		staleCutoff := time.Now().Add(-probeBackoffMax).UnixNano()
+		s.probeBackoff.Range(func(tag string, st *probeBackoffState) bool {
+			if st.eligibleAt.Load() < staleCutoff {
+				s.probeBackoff.Delete(tag)
+			}
+			return true
+		})
 	}
 
 	// Process-global freshness-cache prune. Gated so only the first
@@ -5736,6 +6040,14 @@ const (
 	shortLifeBytesLimit    = int64(4096)     // below this = effectively no data
 	shortLifeThreshold     = 3               // events before banning the node
 	shortLifeWindow        = 60 * time.Second
+
+	// shortLifeMaxEntries caps the shortLife map so a flood of unique
+	// (target, node) pairs between janitor runs can't grow RSS without
+	// bound. When exceeded, recordShortLife sweeps window-expired keys
+	// inline; only the live, within-window set is retained. Sized well
+	// above any realistic in-window working set (a user can't abandon
+	// thousands of distinct destinations inside 60 s).
+	shortLifeMaxEntries = 4096
 )
 
 // handleResetThresholdCrossed runs the decisive cleanup when the
@@ -5810,6 +6122,19 @@ func (s *Smart) recordShortLife(target, node string) (crossed bool) {
 
 	s.shortLifeMu.Lock()
 	defer s.shortLifeMu.Unlock()
+
+	// Inline cap: if the map has grown past the bound since the last
+	// janitor pass, sweep out keys whose newest timestamp already fell
+	// out of the window (they can no longer contribute to a crossing).
+	// O(map) but only triggers in the rare flood case, and bounds RSS
+	// independently of the 5-min prune task.
+	if len(s.shortLife) >= shortLifeMaxEntries {
+		for k, stamps := range s.shortLife {
+			if len(stamps) == 0 || stamps[len(stamps)-1].Before(cutoff) {
+				delete(s.shortLife, k)
+			}
+		}
+	}
 
 	// Compact existing slice: drop entries outside the 60s window
 	old := s.shortLife[key]
