@@ -18,6 +18,7 @@ import (
 var _ adapter.ProviderManager = (*Manager)(nil)
 
 type Manager struct {
+	ctx                   context.Context
 	logger                log.ContextLogger
 	registry              adapter.ProviderRegistry
 	access                sync.Mutex
@@ -29,8 +30,9 @@ type Manager struct {
 	wg                    sync.WaitGroup
 }
 
-func NewManager(logger logger.ContextLogger, registry adapter.ProviderRegistry) *Manager {
+func NewManager(ctx context.Context, logger logger.ContextLogger, registry adapter.ProviderRegistry) *Manager {
 	return &Manager{
+		ctx:           ctx,
 		logger:        logger,
 		registry:      registry,
 		providerByTag: make(map[string]adapter.Provider),
@@ -102,6 +104,7 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 		if startErr != nil {
 			return startErr
 		}
+		return nil
 	}
 	return nil
 }

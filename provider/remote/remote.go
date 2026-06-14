@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -64,6 +65,7 @@ type ProviderRemote struct {
 	cacheFile        adapter.CacheFile
 	httpClient       *http.Client
 	hash             hash.HashType
+	infoMu           sync.RWMutex
 	lastEtag         string
 	lastOutOpts      []option.Outbound
 	lastEPOpts       []option.Endpoint
@@ -106,6 +108,9 @@ func NewProviderRemote(ctx context.Context, router adapter.Router, logFactory lo
 	if updateInterval < time.Hour {
 		updateInterval = time.Hour
 	}
+	if options.UserAgent != "" && options.HTTPClient != nil && !options.HTTPClient.IsEmpty() {
+		return nil, E.New("user_agent conflicts with http_client: configure User-Agent via http_client.headers instead")
+	}
 	var userAgent string
 	if options.UserAgent == "" {
 		userAgent = "sing-box " + C.Version
@@ -116,8 +121,6 @@ func NewProviderRemote(ctx context.Context, router adapter.Router, logFactory lo
 	outbound := service.FromContext[adapter.OutboundManager](ctx)
 	endpointMgr := service.FromContext[adapter.EndpointManager](ctx)
 	logger := logFactory.NewLogger(F.ToString("provider/remote", "[", tag, "]"))
-	updateChan := make(chan struct{})
-	close(updateChan)
 	return &ProviderRemote{
 		Adapter:  provider.NewAdapter(ctx, router, outbound, endpointMgr, logFactory, logger, tag, C.ProviderTypeRemote, options.HealthCheck),
 		ctx:      ctx,
@@ -196,10 +199,14 @@ func (s *ProviderRemote) Update() error {
 }
 
 func (s *ProviderRemote) UpdatedAt() time.Time {
+	s.infoMu.RLock()
+	defer s.infoMu.RUnlock()
 	return s.lastUpdated
 }
 
 func (s *ProviderRemote) SubscriptionInfo() adapter.SubscriptionInfo {
+	s.infoMu.RLock()
+	defer s.infoMu.RUnlock()
 	return s.subscriptionInfo
 }
 
@@ -286,6 +293,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
+		s.infoMu.Lock()
 		s.subscriptionInfo = info
 		now := time.Now()
 		if s.cacheFile != nil {
@@ -313,6 +321,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 			s.saveCacheFile(hasInfo, info, content)
 		}
 		s.lastUpdated = now
+		s.infoMu.Unlock()
 		s.recordSuccess()
 		s.logger.Info("update outbound provider ", s.Tag(), ": not modified")
 		return nil
@@ -351,6 +360,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 		return err
 	}
 	s.UpdateGroups()
+	s.infoMu.Lock()
 	s.subscriptionInfo = info
 	now := time.Now()
 	if s.path != "" || s.cacheFile != nil {
@@ -384,6 +394,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 		s.lastEtag = eTagHeader
 	}
 	s.lastUpdated = now
+	s.infoMu.Unlock()
 	s.recordSuccess()
 	s.logger.Info("updated outbound provider ", s.Tag())
 	return nil
@@ -502,18 +513,21 @@ func computeFastRetryBackoff(failures int) time.Duration {
 }
 
 func (s *ProviderRemote) loopUpdate() {
-	if time.Since(s.lastUpdated) < s.updateInterval {
-		select {
-		case <-s.ctx.Done():
-			return
-		case <-time.After(time.Until(s.lastUpdated.Add(s.updateInterval))):
-			s.updateOnce()
-		}
+	s.ticker.Stop()
+	select {
+	case <-s.ticker.C:
+	default:
+	}
+	if remaining := time.Until(func() time.Time {
+		s.infoMu.RLock()
+		defer s.infoMu.RUnlock()
+		return s.lastUpdated
+	}().Add(s.updateInterval)); remaining > 0 {
+		s.ticker.Reset(remaining)
 	} else {
 		s.updateOnce()
+		s.ticker.Reset(s.updateInterval)
 	}
-	// 重置 ticker，让后续周期锚定在"刚刚 update 完成"时间点（StartContext 已预创建，此处只 Reset）。
-	s.ticker.Reset(s.updateInterval)
 	// 容错启动 fast-retry：lastUpdated 仍为零（首次 fetch 从未成功）时，按指数退避重试。
 	// fastRetryBase=60s 起步 → 2 倍递增 → 封顶 fastRetryCap，±20% 抖动。
 	// 拉取一旦成功（lastUpdated 非零）即停止 fast-retry，由 ticker 接管正常周期。

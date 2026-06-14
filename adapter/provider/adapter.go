@@ -122,14 +122,14 @@ func NewAdapter(ctx context.Context, router adapter.Router, outbound adapter.Out
 		interval = time.Minute
 	}
 	a := Adapter{
-		ctx:          ctx,
-		outbound:     outbound,
-		endpoint:     endpoint,
-		router:       router,
-		logFactory:   logFactory,
-		logger:       logger,
-		providerType: providerType,
-		providerTag:  providerTag,
+		ctx:            ctx,
+		outbound:       outbound,
+		endpoint:       endpoint,
+		router:         router,
+		logFactory:     logFactory,
+		logger:         logger,
+		providerType:   providerType,
+		providerTag:    providerTag,
 		snapshot:       &atomic.Pointer[providerSnapshot]{},
 		writeAccess:    &sync.Mutex{},
 		callbackAccess: &sync.Mutex{},
@@ -153,7 +153,10 @@ func (a *Adapter) Start() error {
 			a.history = urltest.NewHistoryStorage()
 		}
 	}
-	go a.loopCheck()
+	if a.enabled {
+		a.ticker = time.NewTicker(a.interval)
+		go a.loopCheck()
+	}
 	return nil
 }
 
@@ -420,7 +423,7 @@ func (a *Adapter) UpdateBundle(oldOutOpts, newOutOpts []option.Outbound,
 	// 50 ep 时，两阶段串行会吃到 ~3s，合并后 ~1s）。
 	oldSnap := a.loadSnapshot()
 	type removeJob struct {
-		tag      string
+		tag        string
 		isEndpoint bool
 	}
 	var toRemove []removeJob
@@ -656,10 +659,6 @@ func (a *Adapter) Close() error {
 }
 
 func (a *Adapter) loopCheck() {
-	if !a.enabled {
-		return
-	}
-	a.ticker = time.NewTicker(a.interval)
 	a.healthcheck(a.ctx)
 	for {
 		select {
