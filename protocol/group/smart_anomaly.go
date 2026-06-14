@@ -34,6 +34,13 @@ import (
 const (
 	resetEventThreshold = 2                // events before banning the node
 	resetEventWindow    = 60 * time.Second // sliding-window length
+
+	// resetEventsMaxEntries caps the events map so a burst of resets
+	// across many distinct (target, node) pairs can't grow RSS without
+	// bound between the (manual / markAlive-driven) cleanups. On overflow
+	// record() sweeps window-expired keys inline. Sized generously — the
+	// live within-window set is normally tiny.
+	resetEventsMaxEntries = 4096
 )
 
 // resetEventTracker mirrors the shortLife pattern but for upstream
@@ -67,6 +74,17 @@ func (t *resetEventTracker) record(target, node string) (crossed bool) {
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// Inline cap: sweep window-expired keys when the map overflows so a
+	// reset storm across many distinct pairs can't grow RSS unbounded
+	// between cleanups.
+	if len(t.events) >= resetEventsMaxEntries {
+		for k, stamps := range t.events {
+			if len(stamps) == 0 || !stamps[len(stamps)-1].After(cutoff) {
+				delete(t.events, k)
+			}
+		}
+	}
 
 	old := t.events[key]
 	kept := old[:0]
@@ -143,7 +161,7 @@ func isResetErr(err error) bool {
 		"connection reset by peer",
 		"connection reset",
 		"broken pipe",
-		"forcibly closed",            // Windows-friendly
+		"forcibly closed",               // Windows-friendly
 		"forcibly closed by the remote", // Windows: WSAECONNRESET text
 		"reset by peer",
 		"connection aborted",
@@ -164,34 +182,34 @@ func isResetErr(err error) bool {
 //
 // Concrete coverage beyond isResetErr:
 //
-//   TLS alerts / record-layer damage — a GFW-style in-path RST on an
-//     ongoing TLS session typically surfaces to the Go stack as
-//     "remote error: tls: ..." or "tls: bad record MAC" / "tls:
-//     unexpected message" because the truncated stream fails MAC
-//     verification. These are UNRECOVERABLE mid-stream — dropping
-//     the node for this target is correct.
+//	TLS alerts / record-layer damage — a GFW-style in-path RST on an
+//	  ongoing TLS session typically surfaces to the Go stack as
+//	  "remote error: tls: ..." or "tls: bad record MAC" / "tls:
+//	  unexpected message" because the truncated stream fails MAC
+//	  verification. These are UNRECOVERABLE mid-stream — dropping
+//	  the node for this target is correct.
 //
-//   HTTP/2 stream termination — h2 transports translate the underlying
-//     RST into "http2: stream error", "stream closed", or a
-//     "server sent GOAWAY" frame. The GOAWAY case is only fatal when
-//     the error code is non-zero (GRACEFUL=NO_ERROR is normal shutdown
-//     and we must NOT misclassify it); we match "goaway" only when
-//     combined with a non-NO_ERROR code token.
+//	HTTP/2 stream termination — h2 transports translate the underlying
+//	  RST into "http2: stream error", "stream closed", or a
+//	  "server sent GOAWAY" frame. The GOAWAY case is only fatal when
+//	  the error code is non-zero (GRACEFUL=NO_ERROR is normal shutdown
+//	  and we must NOT misclassify it); we match "goaway" only when
+//	  combined with a non-NO_ERROR code token.
 //
-//   QUIC-based outbounds (hysteria2 / tuic) — the stream layer
-//     surfaces "CRYPTO_ERROR", "CONNECTION_CLOSE", "stream reset",
-//     "application error". All three mean the node's upstream hop
-//     tore the tunnel down, not a local timeout.
+//	QUIC-based outbounds (hysteria2 / tuic) — the stream layer
+//	  surfaces "CRYPTO_ERROR", "CONNECTION_CLOSE", "stream reset",
+//	  "application error". All three mean the node's upstream hop
+//	  tore the tunnel down, not a local timeout.
 //
-//   Proxy-protocol framing damage — vmess / trojan / shadowsocks
-//     decoders commonly report "invalid", "short read",
-//     "authentication failed", "frame too large", "protocol error"
-//     when their streams are truncated by an upstream RST. We match
-//     a small whitelist of substrings known to correlate strongly
-//     with upstream-initiated disruption. Individual matches may
-//     false-positive on rare transient errors; the follow-on
-//     debargo TTL (see markDeadForTarget) expires in 60 s so the
-//     cost of a false positive is bounded.
+//	Proxy-protocol framing damage — vmess / trojan / shadowsocks
+//	  decoders commonly report "invalid", "short read",
+//	  "authentication failed", "frame too large", "protocol error"
+//	  when their streams are truncated by an upstream RST. We match
+//	  a small whitelist of substrings known to correlate strongly
+//	  with upstream-initiated disruption. Individual matches may
+//	  false-positive on rare transient errors; the follow-on
+//	  debargo TTL (see markDeadForTarget) expires in 60 s so the
+//	  cost of a false positive is bounded.
 //
 // Deliberately NOT matched (would over-trigger):
 //   - io.EOF / io.ErrUnexpectedEOF: clean half-close or legitimate
