@@ -199,6 +199,10 @@ func (s *ProviderRemote) Update() error {
 }
 
 func (s *ProviderRemote) UpdatedAt() time.Time {
+	return s.updatedAtLocked()
+}
+
+func (s *ProviderRemote) updatedAtLocked() time.Time {
 	s.infoMu.RLock()
 	defer s.infoMu.RUnlock()
 	return s.lastUpdated
@@ -518,11 +522,7 @@ func (s *ProviderRemote) loopUpdate() {
 	case <-s.ticker.C:
 	default:
 	}
-	if remaining := time.Until(func() time.Time {
-		s.infoMu.RLock()
-		defer s.infoMu.RUnlock()
-		return s.lastUpdated
-	}().Add(s.updateInterval)); remaining > 0 {
+	if remaining := time.Until(s.updatedAtLocked().Add(s.updateInterval)); remaining > 0 {
 		s.ticker.Reset(remaining)
 	} else {
 		s.updateOnce()
@@ -538,7 +538,7 @@ func (s *ProviderRemote) loopUpdate() {
 		}
 	}()
 	scheduleFastRetry := func() {
-		if !s.lastUpdated.IsZero() {
+		if !s.updatedAtLocked().IsZero() {
 			return
 		}
 		failures := int(s.consecutiveFailures.Load())
@@ -570,7 +570,7 @@ func (s *ProviderRemote) loopUpdate() {
 			s.updateOnce()
 		case <-fastRetryC:
 			s.updateOnce()
-			if !s.lastUpdated.IsZero() {
+			if !s.updatedAtLocked().IsZero() {
 				if fastRetryTimer != nil {
 					fastRetryTimer.Stop()
 					fastRetryTimer = nil

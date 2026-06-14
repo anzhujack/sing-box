@@ -93,7 +93,7 @@ func (m *Manager) Start(stage adapter.StartStage) error {
 				StartContext(ctx context.Context, startContext *adapter.HTTPStartContext) error
 			}) {
 				defer wg.Done()
-				if err := starter.StartContext(context.Background(), startContext); err != nil {
+				if err := starter.StartContext(m.ctx, startContext); err != nil {
 					errOnce.Do(func() {
 						startErr = E.Cause(err, stage, " provider/", p.Type(), "[", p.Tag(), "]")
 					})
@@ -185,7 +185,9 @@ func (m *Manager) Create(ctx context.Context, router adapter.Router, logFactory 
 			if contextStarter, ok := provider.(interface {
 				StartContext(ctx context.Context, startContext *adapter.HTTPStartContext) error
 			}); ok {
-				err = contextStarter.StartContext(context.Background(), nil)
+				startContext := adapter.NewHTTPStartContext()
+				err = contextStarter.StartContext(m.ctx, startContext)
+				startContext.Close()
 				if err != nil {
 					return E.Cause(err, "start provider/", provider.Type(), "[", provider.Tag(), "]")
 				}

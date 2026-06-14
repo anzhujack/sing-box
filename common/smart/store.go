@@ -74,6 +74,7 @@ var (
 	recordCache       *lruCache[string, *AtomicStatsRecord]
 	dbResultCache     *lruCache[string, map[string][]byte]
 	blockedNodesCache *lruCache[string, map[string]bool]
+	recordLocks       sync.Map // cacheKey -> *sync.Mutex; serializes mutable AtomicStatsRecord creation
 )
 
 // Store is a singleton that wraps bbolt + in-memory caches.
@@ -899,6 +900,16 @@ func (s *Store) GetOrCreateAtomicRecord(cacheKey, group, config, target, proxy s
 	if r, ok := recordCache.Get(cacheKey); ok {
 		return r
 	}
+	lockAny, _ := recordLocks.LoadOrStore(cacheKey, &sync.Mutex{})
+	lock := lockAny.(*sync.Mutex)
+	lock.Lock()
+	defer func() {
+		recordLocks.Delete(cacheKey)
+		lock.Unlock()
+	}()
+	if r, ok := recordCache.Get(cacheKey); ok {
+		return r
+	}
 
 	record := NewAtomicStatsRecord()
 
@@ -932,6 +943,7 @@ func (s *Store) GetOrCreateAtomicRecord(cacheKey, group, config, target, proxy s
 	}
 
 	recordCache.Set(cacheKey, record)
+	recordCache.Wait()
 	return record
 }
 

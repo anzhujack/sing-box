@@ -252,21 +252,42 @@ func URLTestWithDetailAndStatus(ctx context.Context, link string, detour N.Diale
 	}
 	defer client.CloseIdleConnections()
 
-	baseReq, err := http.NewRequest(http.MethodHead, link, nil)
-	if err != nil {
-		return 0, err
+	probeRequest := func(method string, trace *probeTrace) (int, error) {
+		req, reqErr := http.NewRequest(method, link, nil)
+		if reqErr != nil {
+			return 0, reqErr
+		}
+		resp, reqErr := client.Do(req.WithContext(httptrace.WithClientTrace(ctx, trace.hooks())))
+		if reqErr != nil {
+			return 0, reqErr
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, nil
 	}
 
-	// ── Phase 3: first request (cold conn) ──
+	// ── Phase 3: first request (cold conn). Try HEAD first, then fall back
+	// to GET for test endpoints/CDNs that reject HEAD with 405.
 	probe1 := newProbeTrace()
-	resp, err := client.Do(baseReq.WithContext(httptrace.WithClientTrace(ctx, probe1.hooks())))
+	probeMethod := http.MethodHead
+	statusCode, err := probeRequest(probeMethod, probe1)
 	if err != nil {
 		return 0, err
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
-	if statusErr := validateStatus(resp.StatusCode, linkURL, matcher); statusErr != nil {
-		return 0, statusErr
+	if statusErr := validateStatus(statusCode, linkURL, matcher); statusErr != nil {
+		if IsHEADRejected(statusErr) {
+			probe1 = newProbeTrace()
+			probeMethod = http.MethodGet
+			statusCode, err = probeRequest(probeMethod, probe1)
+			if err != nil {
+				return 0, err
+			}
+			if statusErr = validateStatus(statusCode, linkURL, matcher); statusErr != nil {
+				return 0, statusErr
+			}
+		} else {
+			return 0, statusErr
+		}
 	}
 
 	start := dialStart
@@ -276,14 +297,10 @@ func URLTestWithDetailAndStatus(ctx context.Context, link string, detour N.Diale
 	if C.URLTestUnifiedDelay {
 		probe2 := newProbeTrace()
 		second := time.Now()
-		secondResp, ignoredErr := client.Do(baseReq.WithContext(httptrace.WithClientTrace(ctx, probe2.hooks())))
-		if ignoredErr == nil {
-			_, _ = io.Copy(io.Discard, secondResp.Body)
-			_ = secondResp.Body.Close()
-			if validateStatus(secondResp.StatusCode, linkURL, matcher) == nil {
-				start = second
-				firstByteMS = probe2.firstByteMS()
-			}
+		secondStatus, ignoredErr := probeRequest(probeMethod, probe2)
+		if ignoredErr == nil && validateStatus(secondStatus, linkURL, matcher) == nil {
+			start = second
+			firstByteMS = probe2.firstByteMS()
 		}
 	}
 

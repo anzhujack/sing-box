@@ -74,6 +74,7 @@ type lruCache[K lruKey, V any] struct {
 	// and read on ad-hoc debug paths — contention-free either way. Holds
 	// the byte budget when a cost fn is set, else the entry count.
 	capacity atomic.Int64
+	setCount atomic.Uint64
 }
 
 // newLRUBytes creates a byte-budgeted cache: maxBytes is a real memory
@@ -108,6 +109,7 @@ func newCacheCost[K lruKey, V any](maxCost int64, ttl time.Duration, numCounters
 	if numCounters < 128 {
 		numCounters = 128
 	}
+	keysIndex := xsync.NewMapOf[K, struct{}]()
 	c, err := ristretto.NewCache(&ristretto.Config[K, V]{
 		NumCounters: numCounters,
 		MaxCost:     maxCost,
@@ -132,7 +134,7 @@ func newCacheCost[K lruKey, V any](maxCost int64, ttl time.Duration, numCounters
 		inner:     c,
 		ttl:       ttl,
 		cost:      costFn,
-		keysIndex: xsync.NewMapOf[K, struct{}](),
+		keysIndex: keysIndex,
 	}
 	lc.capacity.Store(maxCost)
 	return lc
@@ -150,7 +152,6 @@ func (c *lruCache[K, V]) Get(key K) (V, bool) {
 // Asynchronous: the value becomes visible after ristretto's internal
 // ring buffer drains (sub-millisecond). Call Wait() if you need sync.
 func (c *lruCache[K, V]) Set(key K, value V) {
-	c.keysIndex.Store(key, struct{}{})
 	cost := int64(1)
 	if c.cost != nil {
 		cost = c.cost(value)
@@ -158,11 +159,18 @@ func (c *lruCache[K, V]) Set(key K, value V) {
 			cost = 1
 		}
 	}
+	accepted := false
 	if c.ttl > 0 {
-		c.inner.SetWithTTL(key, value, cost, c.ttl)
-		return
+		accepted = c.inner.SetWithTTL(key, value, cost, c.ttl)
+	} else {
+		accepted = c.inner.Set(key, value, cost)
 	}
-	c.inner.Set(key, value, cost)
+	if accepted {
+		c.keysIndex.Store(key, struct{}{})
+		if c.setCount.Add(1)%1024 == 0 {
+			c.sweepKeysIndex()
+		}
+	}
 }
 
 // Delete removes an entry; no-op when missing.
@@ -181,6 +189,15 @@ func (c *lruCache[K, V]) Clear() {
 	// N ≤ MaxCost, which is bounded by design.
 	c.keysIndex.Range(func(k K, _ struct{}) bool {
 		c.keysIndex.Delete(k)
+		return true
+	})
+}
+
+func (c *lruCache[K, V]) sweepKeysIndex() {
+	c.keysIndex.Range(func(k K, _ struct{}) bool {
+		if _, ok := c.inner.Get(k); !ok {
+			c.keysIndex.Delete(k)
+		}
 		return true
 	})
 }
@@ -232,6 +249,10 @@ func (c *lruCache[K, V]) RemoveByPrefix(prefix string) {
 	// Collect first so we don't mutate while Range is walking.
 	var drop []K
 	c.keysIndex.Range(func(k K, _ struct{}) bool {
+		if _, ok := c.inner.Get(k); !ok {
+			c.keysIndex.Delete(k)
+			return true
+		}
 		if s, ok := any(k).(string); ok && strings.HasPrefix(s, prefix) {
 			drop = append(drop, k)
 		}

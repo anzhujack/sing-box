@@ -195,12 +195,7 @@ func (s *Service) initModel() error {
 		s.logger.Info("lightgbm: auto-update enabled (interval=", interval, ", via=", via, ")")
 		s.dl.Start()
 	} else if !s.model.IsLoaded() {
-		s.logger.Info("lightgbm: model file missing, fetching once from ", url)
-		go func() {
-			if fetchErr := s.dl.FetchOnce(s.ctx); fetchErr != nil {
-				s.logger.Warn("lightgbm: initial download failed: ", fetchErr)
-			}
-		}()
+		s.logger.Warn("lightgbm: model file missing and auto-update disabled; using traditional algorithm until model_path is populated")
 	}
 	return nil
 }
