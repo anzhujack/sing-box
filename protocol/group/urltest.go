@@ -717,6 +717,7 @@ func (g *URLTestGroup) Close() error {
 	g.ticker.Stop()
 	g.pause.UnregisterCallback(g.pauseCallback)
 	close(g.close)
+	urltest.PruneSessionCaches()
 	return nil
 }
 
