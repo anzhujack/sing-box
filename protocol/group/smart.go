@@ -1315,14 +1315,16 @@ func (s *Smart) publishRankingSnapshot(ranking []smart.NodeRank) {
 // what the source-of-truth bbolt table actually contains.
 func (s *Smart) DiagnosticSnapshot() map[string]any {
 	out := map[string]any{
-		"name":            s.Tag(),
-		"algorithm":       s.CurrentAlgorithm(),
-		"hysteresis":      s.HysteresisDuration().String(),
-		"policy_priority": s.PolicyPriorityRules(),
-		"members":         len(s.All()),
-		"now":             s.Now(),
-		"fixed":           s.Selected(),
-		"test_url":        s.TestURL(),
+		"name":                s.Tag(),
+		"algorithm":           s.CurrentAlgorithm(),
+		"hysteresis":          s.HysteresisDuration().String(),
+		"hysteresis_semantic": "delay_delta_ms",
+		"policy_priority":     s.PolicyPriorityRules(),
+		"members":             len(s.All()),
+		"now":                 s.Now(),
+		"fixed":               s.Selected(),
+		"test_url":            s.TestURL(),
+		"selection_preview":   s.selectionPreview("", false),
 	}
 
 	// Snapshot age — hint for which tier serves the next /weights call.

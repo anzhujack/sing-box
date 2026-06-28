@@ -8,6 +8,7 @@ import (
 
 	"github.com/puzpuzpuz/xsync/v3"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/urltest"
 )
 
 // TestNormalizeAlgorithm_NewKinds confirms the four new algorithms
@@ -120,21 +121,72 @@ func TestReorder_LatencyBanded(t *testing.T) {
 	}
 }
 
-// TestApplyHysteresis_HoldsLastPick: with a non-zero window and a
-// recent pick, the algorithm's fresh choice should be overridden in
-// favour of the previously-picked node — provided it's still in the
-// candidate list.
-func TestApplyHysteresis_HoldsLastPick(t *testing.T) {
+// TestReorder_LatencyBanded_DynamicBandUsesURLTestFallback asserts the
+// production complaint that triggered this refactor: 71 ms and 94 ms
+// must not be treated as equally-good just because both sit in the old
+// fixed 50-150 ms bucket. When ShortRTT is absent, the algorithm should
+// fall back to URLTest history and only rotate inside best+dynamic-band.
+func TestReorder_LatencyBanded_DynamicBandUsesURLTestFallback(t *testing.T) {
+	s := setAlgo(&Smart{history: urltest.NewHistoryStorage()}, smartAlgoLatencyBanded)
+	now := time.Now()
+	for tag, delay := range map[string]uint16{
+		"jp-71": 71,
+		"jp-74": 74,
+		"jp-94": 94,
+	} {
+		s.history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: now, Delay: delay})
+	}
+
+	for i := 0; i < 80; i++ {
+		in := makeStubs("jp-94", "jp-74", "jp-71")
+		got := s.reorderForAlgorithm(in, "T", false)
+		if got[0].Tag() == "jp-94" {
+			t.Fatalf("latency-banded picked 94ms candidate inside 71ms best band on iteration %d", i)
+		}
+	}
+}
+
+// TestApplyHysteresis_HoldsLastPickWhenWithinDelta: with a non-zero
+// hysteresis threshold, the previous pick is kept only when it is still
+// close to the fresh best candidate. The threshold is a quality delta,
+// not a wall-clock hold time.
+func TestApplyHysteresis_HoldsLastPickWhenWithinDelta(t *testing.T) {
 	s := &Smart{
-		hysteresisWindow: time.Second,
+		history:          urltest.NewHistoryStorage(),
+		hysteresisWindow: 30 * time.Millisecond,
 		hysteresisMemo:   xsync.NewMapOf[stickyKey, hysteresisEntry](),
 	}
 	s.rememberHysteresisChoice("T", "node-prev", false)
+	now := time.Now()
+	s.history.StoreURLTestHistory("node-fresh", &adapter.URLTestHistory{Time: now, Delay: 71})
+	s.history.StoreURLTestHistory("node-prev", &adapter.URLTestHistory{Time: now, Delay: 94})
 
 	in := makeStubs("node-fresh", "node-other", "node-prev")
 	got := s.applyHysteresis(in, "T", false)
 	if got[0].Tag() != "node-prev" {
 		t.Fatalf("hysteresis didn't promote previous pick: %q", got[0].Tag())
+	}
+}
+
+// TestApplyHysteresis_ReleasesWhenFreshBestIsMateriallyBetter proves the
+// core semantic change: a previous pick must not mask a substantially
+// better candidate. This is what made Smart feel "not smart" on Asian
+// nodes where tens of milliseconds matter.
+func TestApplyHysteresis_ReleasesWhenFreshBestIsMateriallyBetter(t *testing.T) {
+	s := &Smart{
+		history:          urltest.NewHistoryStorage(),
+		hysteresisWindow: 15 * time.Millisecond,
+		hysteresisMemo:   xsync.NewMapOf[stickyKey, hysteresisEntry](),
+	}
+	s.rememberHysteresisChoice("T", "node-prev", false)
+	now := time.Now()
+	s.history.StoreURLTestHistory("node-fresh", &adapter.URLTestHistory{Time: now, Delay: 71})
+	s.history.StoreURLTestHistory("node-prev", &adapter.URLTestHistory{Time: now, Delay: 94})
+
+	in := makeStubs("node-fresh", "node-other", "node-prev")
+	got := s.applyHysteresis(in, "T", false)
+	if got[0].Tag() != "node-fresh" {
+		t.Fatalf("hysteresis kept materially slower previous pick %q; want node-fresh", got[0].Tag())
 	}
 }
 
@@ -155,20 +207,25 @@ func TestApplyHysteresis_PreviousGoneNoOp(t *testing.T) {
 	}
 }
 
-// TestApplyHysteresis_WindowExpiry: once the window has elapsed,
-// hysteresis releases its hold and the algorithm's choice wins.
-func TestApplyHysteresis_WindowExpiry(t *testing.T) {
+// TestApplyHysteresis_StaleMemoStillUsesQualityDelta: the timestamp is
+// retained for janitor cleanup only; selection should not flip merely
+// because a wall-clock window elapsed.
+func TestApplyHysteresis_StaleMemoStillUsesQualityDelta(t *testing.T) {
 	s := &Smart{
-		hysteresisWindow: 5 * time.Millisecond,
+		history:          urltest.NewHistoryStorage(),
+		hysteresisWindow: 30 * time.Millisecond,
 		hysteresisMemo:   xsync.NewMapOf[stickyKey, hysteresisEntry](),
 	}
 	s.rememberHysteresisChoice("T", "node-prev", false)
-	time.Sleep(20 * time.Millisecond) // well past the window
+	now := time.Now()
+	s.history.StoreURLTestHistory("node-fresh", &adapter.URLTestHistory{Time: now, Delay: 71})
+	s.history.StoreURLTestHistory("node-prev", &adapter.URLTestHistory{Time: now, Delay: 94})
+	time.Sleep(20 * time.Millisecond) // well past the old wall-clock interpretation
 
 	in := makeStubs("node-fresh", "node-prev", "node-other")
 	got := s.applyHysteresis(in, "T", false)
-	if got[0].Tag() != "node-fresh" {
-		t.Fatalf("hysteresis should have expired; want 'node-fresh', got %q", got[0].Tag())
+	if got[0].Tag() != "node-prev" {
+		t.Fatalf("hysteresis should be quality-delta based, got %q", got[0].Tag())
 	}
 }
 
@@ -182,6 +239,30 @@ func TestApplyHysteresis_DisabledNoOp(t *testing.T) {
 		if got[i].Tag() != want {
 			t.Fatalf("disabled hysteresis reordered idx %d: got %q want %q", i, got[i].Tag(), want)
 		}
+	}
+}
+
+func TestSelectionPreviewShowsRecommendedAndNowSeparately(t *testing.T) {
+	s := setAlgo(&Smart{history: urltest.NewHistoryStorage()}, smartAlgoLatencyBanded)
+	s.state.Store(&smartGroupState{
+		outbounds: makeStubs("jp-94", "jp-74", "jp-71"),
+		tags:      []string{"jp-94", "jp-74", "jp-71"},
+	})
+	now := time.Now()
+	s.history.StoreURLTestHistory("jp-94", &adapter.URLTestHistory{Time: now, Delay: 94})
+	s.history.StoreURLTestHistory("jp-74", &adapter.URLTestHistory{Time: now, Delay: 74})
+	s.history.StoreURLTestHistory("jp-71", &adapter.URLTestHistory{Time: now, Delay: 71})
+	s.lastSelectedTag.Store("jp-94")
+
+	preview := s.selectionPreview("example.com:443", false)
+	if preview["now"] != "jp-94" {
+		t.Fatalf("now = %v, want last selected jp-94", preview["now"])
+	}
+	if preview["recommended"] == "jp-94" {
+		t.Fatalf("recommended should not echo slower last-selected node: %+v", preview)
+	}
+	if preview["recommended_delay_ms"] != float64(71) && preview["recommended_delay_ms"] != float64(74) {
+		t.Fatalf("recommended delay = %v, want dynamic best band delay: %+v", preview["recommended_delay_ms"], preview)
 	}
 }
 

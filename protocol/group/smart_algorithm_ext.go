@@ -34,11 +34,13 @@ const (
 	// top set" algorithms share the same breadth.
 	p2cTopK = 5
 
-	// latencyBandFastMS / SlowMS define the three buckets used by
-	// latency-banded. Tuned for typical proxy RTTs from CN ISPs:
-	// < 50 ms is excellent; 50–150 is acceptable; >150 is degraded.
-	latencyBandFastMS = 50.0
-	latencyBandSlowMS = 150.0
+	// latencyBandDynamicMinMS / MaxMS bound latency-banded's dynamic
+	// best+delta cohort. The old fixed buckets (<50 / 50-150 / >150)
+	// treated 71 ms and 94 ms as equivalent "medium" nodes; dynamic
+	// banding keeps only nodes close to the CURRENT best measured delay.
+	latencyBandDynamicMinMS = 8.0
+	latencyBandDynamicMaxMS = 25.0
+	latencyBandDynamicRatio = 0.12
 )
 
 // shortRTTCacheTTL is how long a per-node ShortRTT lookup is cached in
@@ -52,7 +54,7 @@ const shortRTTCacheTTL = 250 * time.Millisecond
 // was captured. Stored by value (xsync.MapOf supports any comparable
 // value type but we want amortised allocation-free reads via Load).
 type shortRTTCacheEntry struct {
-	rttMS  float64
+	rttMS    float64
 	storedAt int64 // unix-nano
 }
 
@@ -139,6 +141,38 @@ func (s *Smart) cachedShortRTT(tag string) float64 {
 	rtt := s.shortRTTFor(tag)
 	shortRTTCache.Store(key, shortRTTCacheEntry{rttMS: rtt, storedAt: now})
 	return rtt
+}
+
+// candidateDelayMS returns the best available per-node delay signal in
+// milliseconds. ShortRTT is the freshest real-traffic signal; URLTest
+// history is the cold-start / health-check fallback. Zero means unknown.
+func (s *Smart) candidateDelayMS(tag string) float64 {
+	if tag == "" {
+		return 0
+	}
+	if rtt := s.cachedShortRTT(tag); rtt > 0 {
+		return rtt
+	}
+	if s.history != nil {
+		if h := s.history.LoadURLTestHistory(tag); h != nil && h.Delay > 0 {
+			return float64(h.Delay)
+		}
+	}
+	return 0
+}
+
+func dynamicLatencyBandDeltaMS(best float64) float64 {
+	if best <= 0 {
+		return 0
+	}
+	delta := best * latencyBandDynamicRatio
+	if delta < latencyBandDynamicMinMS {
+		return latencyBandDynamicMinMS
+	}
+	if delta > latencyBandDynamicMaxMS {
+		return latencyBandDynamicMaxMS
+	}
+	return delta
 }
 
 // reorderRoundRobin picks the next candidate by an atomic counter
@@ -246,10 +280,10 @@ func (s *Smart) scoreP2C(a, b adapter.Outbound) int {
 	return 0
 }
 
-// reorderLatencyBanded buckets top-K candidates into three latency
-// bands and promotes a uniformly-random pick from the lowest non-empty
-// band. Strips the long tail (a 1000 ms node never wins over a
-// 50 ms node) without pinning to the single fastest node.
+// reorderLatencyBanded promotes a uniformly-random pick from the
+// dynamic best+delta cohort. This keeps load spread among truly
+// comparable nodes while preventing the old fixed-bucket problem where
+// 71 ms and 94 ms Asia nodes were both "medium" and randomly swapped.
 //
 // Allocation-free: per-call buckets are scratch indexes only.
 func (s *Smart) reorderLatencyBanded(candidates []adapter.Outbound) []adapter.Outbound {
@@ -260,40 +294,32 @@ func (s *Smart) reorderLatencyBanded(candidates []adapter.Outbound) []adapter.Ou
 	if k > len(candidates) {
 		k = len(candidates)
 	}
-	// Three bands: fast, medium, slow. Allocate-on-stack via small
-	// fixed-size array — Go escape analysis keeps it on the goroutine
-	// stack since the slice header doesn't escape this function.
-	var fast, medium, slow [p2cTopK]int
-	var nFast, nMedium, nSlow int
+	var delays [p2cTopK]float64
+	best := 0.0
 	for i := 0; i < k; i++ {
-		rtt := s.cachedShortRTT(candidates[i].Tag())
-		switch {
-		case rtt > 0 && rtt < latencyBandFastMS:
-			fast[nFast] = i
-			nFast++
-		case rtt > 0 && rtt < latencyBandSlowMS:
-			medium[nMedium] = i
-			nMedium++
-		default:
-			// Includes RTT==0 (no signal) — treated as "unknown" not
-			// "slow"; clustered into the slow band so candidates with
-			// real measurements get preferred.
-			slow[nSlow] = i
-			nSlow++
+		d := s.candidateDelayMS(candidates[i].Tag())
+		delays[i] = d
+		if d > 0 && (best == 0 || d < best) {
+			best = d
 		}
 	}
-	r := pickRand()
-	var pick int
-	switch {
-	case nFast > 0:
-		pick = fast[r.IntN(nFast)]
-	case nMedium > 0:
-		pick = medium[r.IntN(nMedium)]
-	case nSlow > 0:
-		pick = slow[r.IntN(nSlow)]
-	default:
+	if best == 0 {
 		return candidates
 	}
+	limit := best + dynamicLatencyBandDeltaMS(best)
+	var cohort [p2cTopK]int
+	nCohort := 0
+	for i := 0; i < k; i++ {
+		if d := delays[i]; d > 0 && d <= limit {
+			cohort[nCohort] = i
+			nCohort++
+		}
+	}
+	if nCohort == 0 {
+		return candidates
+	}
+	r := pickRand()
+	pick := cohort[r.IntN(nCohort)]
 	if pick > 0 {
 		candidates[0], candidates[pick] = candidates[pick], candidates[0]
 	}
@@ -301,11 +327,9 @@ func (s *Smart) reorderLatencyBanded(candidates []adapter.Outbound) []adapter.Ou
 }
 
 // applyHysteresis is the cross-cutting anti-flap layer applied AFTER
-// reorderForAlgorithm. When the user has configured a non-zero
-// hysteresis window AND the previously-picked node for this target is
-// still present in the candidate list AND the window hasn't expired,
-// the previous pick is forced back to position 0 — overriding the
-// algorithm's fresh evaluation.
+// reorderForAlgorithm. `hysteresis` is interpreted as a quality delta
+// (milliseconds), not a wall-clock pin duration: keep the previous pick
+// only while it remains within threshold of the fresh best candidate.
 //
 // Why post-algorithm: we want algorithm scoring to see uncoloured
 // candidates so its own decisions remain meaningful for new targets;
@@ -319,11 +343,19 @@ func (s *Smart) applyHysteresis(candidates []adapter.Outbound, target string, is
 	if !ok || entry.tag == "" {
 		return candidates
 	}
-	if time.Since(time.Unix(0, entry.at)) > s.hysteresisWindow {
-		return candidates
-	}
 	for i, ob := range candidates {
 		if ob.Tag() == entry.tag {
+			bestDelay := s.candidateDelayMS(candidates[0].Tag())
+			prevDelay := s.candidateDelayMS(entry.tag)
+			if bestDelay > 0 && prevDelay > 0 {
+				delta := prevDelay - bestDelay
+				if delta < 0 {
+					delta = 0
+				}
+				if delta > float64(s.hysteresisWindow/time.Millisecond) {
+					return candidates
+				}
+			}
 			if i != 0 {
 				candidates[0], candidates[i] = candidates[i], candidates[0]
 			}
@@ -333,6 +365,45 @@ func (s *Smart) applyHysteresis(candidates []adapter.Outbound, target string, is
 	// Previously-picked node has dropped from the candidate list
 	// (e.g. went dead) — let the algorithm's choice stand.
 	return candidates
+}
+
+func (s *Smart) selectionPreview(target string, isUDP bool) map[string]any {
+	out := map[string]any{
+		"algorithm":     s.CurrentAlgorithm(),
+		"hysteresis_ms": float64(s.hysteresisWindow / time.Millisecond),
+		"now":           s.Now(),
+	}
+	snap := s.state.Load()
+	if snap == nil || len(snap.outbounds) == 0 {
+		out["source"] = "empty"
+		return out
+	}
+	candidates := make([]adapter.Outbound, len(snap.outbounds))
+	copy(candidates, snap.outbounds)
+	candidates = s.reorderForAlgorithm(candidates, target, isUDP)
+	fresh := ""
+	if len(candidates) > 0 {
+		fresh = candidates[0].Tag()
+		out["fresh_best"] = fresh
+		if d := s.candidateDelayMS(fresh); d > 0 {
+			out["fresh_best_delay_ms"] = d
+		}
+	}
+	candidates = s.applyHysteresis(candidates, target, isUDP)
+	if len(candidates) > 0 {
+		recommended := candidates[0].Tag()
+		out["recommended"] = recommended
+		if d := s.candidateDelayMS(recommended); d > 0 {
+			out["recommended_delay_ms"] = d
+		}
+		if recommended != fresh {
+			out["reason"] = "kept_by_hysteresis_delta"
+		} else {
+			out["reason"] = "fresh_algorithm_choice"
+		}
+	}
+	out["source"] = "algorithm-preview"
+	return out
 }
 
 // rememberHysteresisChoice records the just-picked node for a target.
