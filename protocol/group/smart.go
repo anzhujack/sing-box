@@ -3373,9 +3373,10 @@ type smartTrackedConn struct {
 	lastIOErr atomic.Pointer[error]
 
 	// lastReadAt is the unix-nano timestamp of the most recent successful
-	// Read (n > 0). Drives the stalled-transfer watchdog: when a conn
-	// has data but stops moving for stalledTransferTimeout the watchdog
-	// force-closes it and triggers an algorithm-aware node switch.
+	// Read (n > 0). It is kept for telemetry and future configurable
+	// policy. Default Smart no longer force-closes post-first-byte idle
+	// transfers, because long-response APIs may legitimately wait longer
+	// than stalledTransferTimeout before sending more body bytes.
 	// 0 means no successful read yet — first-byte watchdog handles that.
 	lastReadAt atomic.Int64
 
@@ -3412,9 +3413,9 @@ func (c *smartTrackedConn) Read(b []byte) (int, error) {
 	n, err := c.Conn.Read(b)
 	if n > 0 {
 		c.download.Add(int64(n))
-		// Stamp last-active for the stalled-transfer watchdog. Atomic
-		// store on every payload Read is cheap; the watchdog reads it
-		// at most once per scan tick.
+		// Stamp last-active for telemetry/future policy. Atomic store on
+		// every payload Read is cheap; the watchdog may observe it but no
+		// longer force-closes post-first-byte idle transfers by default.
 		c.lastReadAt.Store(time.Now().UnixNano())
 	}
 	firstByteJustNow := false
@@ -3462,16 +3463,11 @@ func (c *smartTrackedConn) Read(b []byte) (int, error) {
 			c.s.triggerInstantResetEviction(c, "read", err)
 		}
 	}
-	// Kernel-driven watchdog: Read returned a deadline-style timeout.
-	// Decide between (a) a genuine stall (no recent activity) → trigger
-	// the same eviction sequence as a TCP RST so the algorithm picks
-	// a different node on the very next dial; or (b) a benign deadline
-	// fire (we just had real bytes a moment ago — the deadline simply
-	// hasn't been re-armed yet) → push the deadline forward and let
-	// the caller decide whether to retry. This is the "极速响应"
-	// path: the trigger fires the instant the kernel observes the
-	// stall, no goroutine sleep / wakeup involved.
-	if err != nil && isWatchdogDeadlineErr(err) && !c.watchdogTriggered.Load() {
+	// Kernel-driven first-byte watchdog: Read returned a deadline-style
+	// timeout before the conn produced payload. Post-first-byte idle is
+	// deliberately NOT evicted here; long-response APIs can legitimately
+	// wait 60-120s before returning more body bytes.
+	if err != nil && wasPreFirstByte && isWatchdogDeadlineErr(err) && !c.watchdogTriggered.Load() {
 		lastNS := c.lastReadAt.Load()
 		idle := time.Since(c.startTime)
 		if lastNS != 0 {

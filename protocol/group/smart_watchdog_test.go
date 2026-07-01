@@ -40,8 +40,8 @@ func TestIsWatchdogDeadlineErr(t *testing.T) {
 // don't accidentally rely on platform-specific behaviour.
 type timeoutErr struct{}
 
-func (timeoutErr) Error() string { return "timeout" }
-func (timeoutErr) Timeout() bool { return true }
+func (timeoutErr) Error() string   { return "timeout" }
+func (timeoutErr) Timeout() bool   { return true }
 func (timeoutErr) Temporary() bool { return false }
 
 // deadlineTrackingFake records SetReadDeadline calls so tests can
@@ -77,20 +77,20 @@ func TestApplyFirstByteDeadline_ReachesUnderlyingConn(t *testing.T) {
 	}
 }
 
-// TestArmTransferStalledDeadline confirms the second deadline (after
-// first byte arrives) uses the longer transfer-stalled budget.
+// TestArmTransferStalledDeadline confirms that after the first byte
+// arrives we clear the first-byte watchdog deadline instead of arming a
+// hard transfer-idle deadline. Long-response APIs can legitimately sit
+// without downstream payload for longer than stalledTransferTimeout.
 func TestArmTransferStalledDeadline(t *testing.T) {
 	fake := &deadlineTrackingFake{fakeNetConn: &fakeNetConn{}}
 	c := &smartTrackedConn{Conn: fake}
-	before := time.Now()
 	c.armTransferStalledDeadline()
 	if len(fake.deadlines) != 1 {
 		t.Fatalf("SetReadDeadline call count = %d, want 1", len(fake.deadlines))
 	}
 	got := fake.deadlines[0]
-	min := before.Add(stalledTransferTimeout - time.Second)
-	if got.Before(min) {
-		t.Fatalf("deadline = %v, want >= %v", got, min)
+	if !got.IsZero() {
+		t.Fatalf("deadline = %v, want zero time (cleared)", got)
 	}
 }
 
@@ -275,10 +275,12 @@ func TestWatchdog_FirstByteTimeoutClosesAndSwitches(t *testing.T) {
 	}
 }
 
-// TestWatchdog_TransferStalledClosesAndSwitches first byte arrived
-// long ago, then >stalledTransferTimeout of silence — expect close
-// + switch.
-func TestWatchdog_TransferStalledClosesAndSwitches(t *testing.T) {
+// TestWatchdog_LongResponseIdleNotClosed first byte arrived long ago,
+// then >stalledTransferTimeout of silence. This used to be treated as
+// transfer-stalled and force-closed, but that kills valid long-response
+// APIs such as AI image generation where the server may compute for
+// 60-120s before returning response body bytes.
+func TestWatchdog_LongResponseIdleNotClosed(t *testing.T) {
 	s := newTestSmartForWatchdog(t)
 	_, fake := stageStalledConn(s, "stalled.example", "node-B",
 		2*stalledTransferTimeout, true, stalledTransferTimeout+5*time.Second)
@@ -286,8 +288,8 @@ func TestWatchdog_TransferStalledClosesAndSwitches(t *testing.T) {
 	defer func() { _ = recover() }()
 	s.runStalledConnWatchdog()
 
-	if !fake.closed.Load() {
-		t.Fatal("watchdog did not close stalled-transfer fake conn")
+	if fake.closed.Load() {
+		t.Fatal("watchdog closed a post-first-byte idle conn; long-response APIs must be allowed to wait")
 	}
 }
 

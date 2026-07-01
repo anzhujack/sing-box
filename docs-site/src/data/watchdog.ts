@@ -103,8 +103,8 @@ export const constants = [
     name: 'stalledTransferTimeout',
     go: 'protocol/group/smart_watchdog.go',
     value: '30s',
-    zh: '已有字节流但陷入静默的最大容忍时间。',
-    en: 'Maximum idle tolerated after the first byte has been received.',
+    zh: '仅作为历史/观测阈值保留；默认不再用它硬关闭首字节后的空闲连接，避免误杀 AI 生图/长推理等长响应 API。',
+    en: 'Retained only as a historical/observability threshold; default Smart no longer uses it to hard-close post-first-byte idle conns, avoiding false positives on long-response APIs such as AI image generation/inference.',
   },
   {
     name: 'watchdogScanInterval',

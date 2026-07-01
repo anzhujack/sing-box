@@ -19,14 +19,23 @@ import (
 //     mid-stream (ERR_CONNECTION_RESET).
 //   - circuitBreaker — explicit dial failures.
 //
-// The remaining gap is the connection that DIALED OK but then either
-// (a) never produces a first byte even after several seconds — the
-// node is silently absorbing the request — or (b) successfully
-// produced bytes earlier but then stalled mid-transfer. Without an
-// explicit watchdog these conns can hang for the full kernel/TLS
-// timeout (often a minute or more) before the user's app gives up,
-// during which Smart never learns the node is broken and keeps
-// re-electing it for new requests to the same target.
+// The remaining gap is the connection that DIALED OK but then never
+// produces a first byte even after several seconds — the node is
+// silently absorbing the request. Without an explicit watchdog these
+// conns can hang for the full kernel/TLS timeout (often a minute or
+// more) before the user's app gives up, during which Smart never
+// learns the node is broken and keeps re-electing it for new requests
+// to the same target.
+//
+// Historically this watchdog also treated "had bytes earlier, then no
+// more payload for 30s" as transfer-stalled and force-evicted the
+// connection. That is unsafe for long-response APIs (AI image
+// generation, LLM inference, long polling, SSE-ish backends) where the
+// request is valid but the server may spend 60-120s computing before
+// returning the next response body bytes. Keep the aggressive
+// first-byte blackhole protection, but do not install a hard
+// post-first-byte ReadDeadline or periodic close for idle established
+// transfers.
 //
 // The watchdog is a single periodic task per Smart group, not a
 // goroutine per conn — at 16 groups × 200 active conns the
@@ -47,10 +56,11 @@ const (
 	// doesn't sit on a blank page when the upstream is filtered.
 	firstByteWatchdogTimeout = 5 * time.Second
 
-	// stalledTransferTimeout: had bytes flowing, then dead silence
-	// for this long. 30 s is well past any normal HTTP/2 idle period
-	// (the spec keep-alive is shorter) but well before the user
-	// would tolerate a frozen page.
+	// stalledTransferTimeout is retained only as an observation threshold
+	// for logs/tests and for future configurable policy. It MUST NOT be
+	// used as a hard post-first-byte ReadDeadline by default: long-running
+	// API calls can legitimately have no downstream payload for longer
+	// than this while the server computes a response.
 	stalledTransferTimeout = 30 * time.Second
 
 	// watchdogScanInterval: backstop scan period. The PRIMARY
@@ -85,7 +95,7 @@ func (c *smartTrackedConn) applyFirstByteDeadline() {
 	if c.s != nil && c.s.history != nil {
 		h := c.s.history.LoadURLTestHistory(c.proxyTag)
 		if h != nil && h.Delay > 0 {
-			adaptive := time.Duration(float64(h.Delay) * 4.0) * time.Millisecond
+			adaptive := time.Duration(float64(h.Delay)*4.0) * time.Millisecond
 			if adaptive < 1500*time.Millisecond {
 				adaptive = 1500 * time.Millisecond
 			}
@@ -98,26 +108,28 @@ func (c *smartTrackedConn) applyFirstByteDeadline() {
 	_ = c.Conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
-// armTransferStalledDeadline switches the kernel deadline from the
-// (short) first-byte budget to the (longer) transfer-stalled budget
-// once the conn has produced at least one payload byte. Called
-// exactly once on the first successful Read.
+// armTransferStalledDeadline is called once the conn has produced at
+// least one payload byte. At that point the first-byte blackhole
+// detector has done its job, so clear the read deadline instead of
+// arming a post-first-byte timeout. A fixed idle ReadDeadline here
+// misclassifies long-response APIs (for example AI image generation
+// that returns a body after 60-120s of computation) as stalled.
 func (c *smartTrackedConn) armTransferStalledDeadline() {
 	if c.Conn == nil {
 		return
 	}
-	_ = c.Conn.SetReadDeadline(time.Now().Add(stalledTransferTimeout))
+	_ = c.Conn.SetReadDeadline(time.Time{})
 }
 
-// rearmTransferStalledDeadline pushes the deadline forward whenever
-// recent activity proves the conn is healthy. Skipped when the
-// existing deadline still has plenty of headroom — saves the syscall
-// on every Read in steady-state high-throughput streams.
+// rearmTransferStalledDeadline used to push a post-first-byte deadline
+// forward. The default policy no longer applies a hard transfer-idle
+// deadline, so this is intentionally a no-op/clear helper retained for
+// call-site compatibility.
 func (c *smartTrackedConn) rearmTransferStalledDeadline() {
 	if c.Conn == nil {
 		return
 	}
-	_ = c.Conn.SetReadDeadline(time.Now().Add(stalledTransferTimeout))
+	_ = c.Conn.SetReadDeadline(time.Time{})
 }
 
 // clearReadDeadline removes the watchdog's deadline before the conn
@@ -259,10 +271,10 @@ func (s *Smart) runStalledConnWatchdog() {
 		return
 	}
 	type victim struct {
-		c        *smartTrackedConn
-		target   string
-		kind     string
-		ageMS    int64
+		c      *smartTrackedConn
+		target string
+		kind   string
+		ageMS  int64
 	}
 	now := time.Now()
 	var victims []victim
@@ -284,14 +296,11 @@ func (s *Smart) runStalledConnWatchdog() {
 				}
 				continue
 			}
-			lastNS := c.lastReadAt.Load()
-			if lastNS == 0 {
-				continue // first read seen but byte-tracking not started — defer judgement
-			}
-			idle := now.Sub(time.Unix(0, lastNS))
-			if idle > stalledTransferTimeout {
-				victims = append(victims, victim{c, tgt, "transfer-stalled", idle.Milliseconds()})
-			}
+			// Post-first-byte idle is not a reliable failure signal for
+			// long-response APIs: the server may legitimately compute for
+			// longer than stalledTransferTimeout before sending more body
+			// bytes. Keep first-byte blackhole eviction above, but do not
+			// force-close established transfers here.
 		}
 	}
 	s.targetConnsMu.Unlock()
