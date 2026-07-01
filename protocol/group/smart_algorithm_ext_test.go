@@ -242,6 +242,53 @@ func TestApplyHysteresis_DisabledNoOp(t *testing.T) {
 	}
 }
 
+func TestStickyFastPath_HysteresisReleasesMateriallySlowerPick(t *testing.T) {
+	s := setAlgo(&Smart{
+		history:          urltest.NewHistoryStorage(),
+		stickyByTarget:   xsync.NewMapOf[stickyKey, string](),
+		hysteresisWindow: 50 * time.Millisecond,
+		knownDead:        xsync.NewMapOf[string, time.Time](),
+		breakers:         xsync.NewMapOf[string, *circuitBreakerState](),
+		targetDebargo:    xsync.NewMapOf[string, time.Time](),
+		interval:         time.Minute,
+	}, smartAlgoConsistentHashing)
+	target := "example.com:443"
+	s.rememberStickyChoice(target, "node-slow", false)
+	now := time.Now()
+	s.history.StoreURLTestHistory("node-fast", &adapter.URLTestHistory{Time: now, Delay: 60})
+	s.history.StoreURLTestHistory("node-slow", &adapter.URLTestHistory{Time: now, Delay: 260})
+
+	got := s.stickyFastPath(&smartDialMeta{smartTarget: target}, makeStubs("node-fast", "node-slow"), false)
+	if got != nil {
+		t.Fatalf("hysteresis fast path kept materially slower %q; want full re-selection", got.Tag())
+	}
+}
+
+func TestStickyFastPath_HysteresisKeepsComparablePick(t *testing.T) {
+	s := setAlgo(&Smart{
+		history:          urltest.NewHistoryStorage(),
+		stickyByTarget:   xsync.NewMapOf[stickyKey, string](),
+		hysteresisWindow: 50 * time.Millisecond,
+		knownDead:        xsync.NewMapOf[string, time.Time](),
+		breakers:         xsync.NewMapOf[string, *circuitBreakerState](),
+		targetDebargo:    xsync.NewMapOf[string, time.Time](),
+		interval:         time.Minute,
+	}, smartAlgoConsistentHashing)
+	target := "example.com:443"
+	s.rememberStickyChoice(target, "node-prev", false)
+	now := time.Now()
+	s.history.StoreURLTestHistory("node-fast", &adapter.URLTestHistory{Time: now, Delay: 60})
+	s.history.StoreURLTestHistory("node-prev", &adapter.URLTestHistory{Time: now, Delay: 82})
+
+	got := s.stickyFastPath(&smartDialMeta{smartTarget: target}, makeStubs("node-fast", "node-prev"), false)
+	if got == nil || got.Tag() != "node-prev" {
+		if got == nil {
+			t.Fatalf("hysteresis fast path released comparable previous pick; want node-prev")
+		}
+		t.Fatalf("hysteresis fast path got %q; want node-prev", got.Tag())
+	}
+}
+
 func TestSelectionPreviewShowsRecommendedAndNowSeparately(t *testing.T) {
 	s := setAlgo(&Smart{history: urltest.NewHistoryStorage()}, smartAlgoLatencyBanded)
 	s.state.Store(&smartGroupState{

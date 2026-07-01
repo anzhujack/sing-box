@@ -521,7 +521,47 @@ func (s *Smart) stickyFastPath(meta *smartDialMeta, all []adapter.Outbound, isUD
 	if s.isTargetSuspicious(meta.smartTarget, wantTag) {
 		return nil
 	}
+	if algo != smartAlgoStickySession && !s.hysteresisFastPathStillCompetitive(wantTag, all, meta.smartTarget, isUDP) {
+		return nil
+	}
 	return want
+}
+
+// hysteresisFastPathStillCompetitive preserves the "quality delta" contract
+// for stickyFastPath's hysteresis shortcut. The slower full path applies
+// applyHysteresis AFTER computing the fresh best candidate; the fast path must
+// not skip that quality check, otherwise a once-successful but now 250ms node
+// can keep masking a 60ms fresh best simply because it is still alive.
+func (s *Smart) hysteresisFastPathStillCompetitive(wantTag string, all []adapter.Outbound, target string, isUDP bool) bool {
+	if s.hysteresisWindow <= 0 || wantTag == "" {
+		return false
+	}
+	wantDelay := s.candidateDelayMS(wantTag)
+	if wantDelay <= 0 {
+		return false
+	}
+	bestDelay := 0.0
+	for _, ob := range all {
+		if ob == nil {
+			continue
+		}
+		tag := ob.Tag()
+		if tag == "" || (isUDP && !s.supportsUDP(ob)) || !s.isAlive(tag) || s.isTargetDebargoed(target, tag) || s.isTargetSuspicious(target, tag) {
+			continue
+		}
+		d := s.candidateDelayMS(tag)
+		if d > 0 && (bestDelay == 0 || d < bestDelay) {
+			bestDelay = d
+		}
+	}
+	if bestDelay <= 0 {
+		return false
+	}
+	delta := wantDelay - bestDelay
+	if delta < 0 {
+		delta = 0
+	}
+	return delta <= float64(s.hysteresisWindow/time.Millisecond)
 }
 
 // shortRTTFor reads the short-window EWMA latency for a node tag. Costs
