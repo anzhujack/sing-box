@@ -104,6 +104,7 @@ type Client struct {
 	minCacheTTL       uint32
 	maxCacheTTL       uint32
 	clientSubnet      netip.Prefix
+	prefetchMgr       *PrefetchManager
 	rdrc              adapter.RDRCStore
 	initRDRCFunc      func() adapter.RDRCStore
 	dnsCache          adapter.DNSCacheStore
@@ -126,6 +127,7 @@ type ClientOptions struct {
 	MinCacheTTL       uint32
 	MaxCacheTTL       uint32
 	ClientSubnet      netip.Prefix
+	PrefetchMgr       *PrefetchManager
 	RDRC              func() adapter.RDRCStore
 	DNSCache          func() adapter.DNSCacheStore
 	Logger            logger.ContextLogger
@@ -144,6 +146,7 @@ func NewClient(options ClientOptions) *Client {
 		minCacheTTL:       options.MinCacheTTL,
 		maxCacheTTL:       options.MaxCacheTTL,
 		clientSubnet:      options.ClientSubnet,
+		prefetchMgr:       options.PrefetchMgr,
 		initRDRCFunc:      options.RDRC,
 		initDNSCacheFunc:  options.DNSCache,
 		logger:            options.Logger,
