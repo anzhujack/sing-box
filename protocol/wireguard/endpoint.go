@@ -28,6 +28,7 @@ import (
 var (
 	_ adapter.OutboundWithPreferredRoutes = (*Endpoint)(nil)
 	_ dialer.PacketDialerWithDestination  = (*Endpoint)(nil)
+	_ adapter.InterfaceUpdateListener     = (*Endpoint)(nil)
 )
 
 func RegisterEndpoint(registry *endpoint.Registry) {
@@ -80,13 +81,14 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		gso = *options.GSO
 	}
 	wgEndpoint, err := wireguard.NewEndpoint(wireguard.EndpointOptions{
-		Context:    ctx,
-		Logger:     logger,
-		System:     options.System,
-		GSO:        gso,
-		Handler:    ep,
-		UDPTimeout: udpTimeout,
-		Dialer:     outboundDialer,
+		Context:     ctx,
+		Logger:      logger,
+		System:      options.System,
+		GSO:         gso,
+		Handler:     ep,
+		UDPTimeout:  udpTimeout,
+		ICMPTimeout: C.ICMPTimeout,
+		Dialer:      outboundDialer,
 		CreateDialer: func(interfaceName string) N.Dialer {
 			return common.Must1(dialer.NewDefault(ctx, option.DialerOptions{
 				BindInterface: interfaceName,
@@ -147,6 +149,16 @@ func (w *Endpoint) Start(stage adapter.StartStage) error {
 func (w *Endpoint) Close() error {
 	w.started.Store(false)
 	return w.endpoint.Close()
+}
+
+func (w *Endpoint) InterfaceUpdated() {
+	if !w.started.Load() {
+		return
+	}
+	err := w.endpoint.BindUpdate()
+	if err != nil {
+		w.logger.Warn(E.Cause(err, "update WireGuard bind after network change"))
+	}
 }
 
 func (w *Endpoint) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {

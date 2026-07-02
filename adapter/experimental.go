@@ -38,48 +38,19 @@ type V2RayServer interface {
 	StatsService() ConnectionTracker
 }
 
-// SmartService is the singleton that owns infrastructure shared by all Smart
-// outbound groups: the LightGBM model, its auto-updater, and the training
-// sample collector. It is registered on startup when experimental.smart is
-// configured; Smart groups retrieve it via service.FromContext and opt in
-// per-group via their use_lightgbm / collect_data flags.
-//
-// The concrete type lives in experimental/smart. Callers that need typed
-// accessors (e.g. for LightGBM model / collector) should type-assert to the
-// concrete *smart.Service.
 type SmartService interface {
 	LifecycleService
-	// LightGBMEnabled reports whether the shared ML model is configured.
 	LightGBMEnabled() bool
-	// CollectorEnabled reports whether the shared training-data collector is configured.
 	CollectorEnabled() bool
 }
 
-// GeoXService is the singleton that downloads and tracks global geo data
-// assets (geoip.dat / geosite.dat / country.mmdb / GeoLite2-ASN.mmdb).
-//
-// Other services (currently only Smart group, via use_asn) retrieve local
-// file paths through this service when their per-group config leaves the
-// corresponding path empty.
 type GeoXService interface {
 	LifecycleService
-
-	// Enabled reports whether experimental.geox.enabled was set.
 	Enabled() bool
-
-	// GeoIPPath returns the local path of the downloaded geoip.dat, or
-	// "" if not configured / not yet downloaded.
 	GeoIPPath() string
-	// GeoSitePath returns the local path of the downloaded geosite.dat.
 	GeoSitePath() string
-	// MMDBPath returns the local path of the downloaded country.mmdb.
 	MMDBPath() string
-	// ASNPath returns the FIRST local ASN mmdb path (back-compat with the
-	// single-source API). Empty if no ASN URL is configured. Callers that
-	// want fallback across multiple providers should use ASNPaths().
 	ASNPath() string
-	// ASNPaths returns every configured ASN mmdb path in priority order.
-	// Empty slice when no ASN URL is configured.
 	ASNPaths() []string
 }
 
@@ -110,7 +81,6 @@ type CacheFile interface {
 	SaveExternalUI(tag string, info *SavedBinary) error
 	LoadSubscription(tag string) *SavedBinary
 	SaveSubscription(tag string, sub *SavedBinary) error
-
 	SmartDB() *bbolt.DB
 }
 
@@ -214,19 +184,7 @@ type OutboundGroup interface {
 	Outbound
 	Now() string
 	All() []string
-
-	// Hidden reports the dashboard hint set in option.GroupCommonOption.
-	// Returning true tells Clash-style front-ends to keep this group out
-	// of the proxy switcher; routing rules continue to work either way.
-	// All four built-in groups (Selector / URLTest / LoadBalance /
-	// Smart) implement this — third-party group implementations should
-	// return false when no hint is configured.
 	Hidden() bool
-
-	// Icon returns the opaque dashboard icon string from
-	// option.GroupCommonOption (URL / data URI / emoji). Empty means
-	// "no icon configured" and front-ends should fall back to their
-	// default rendering.
 	Icon() string
 }
 

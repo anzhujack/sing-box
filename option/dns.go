@@ -60,33 +60,6 @@ type DNSClientOptions struct {
 	MaxCacheTTL      uint32                `json:"max_cache_ttl,omitempty"`
 	Optimistic       *OptimisticDNSOptions `json:"optimistic,omitempty"`
 	ClientSubnet     *badoption.Prefixable `json:"client_subnet,omitempty"`
-	Prefetch         *PrefetchDNSOptions   `json:"prefetch,omitempty"`
-}
-
-type _PrefetchDNSOptions struct {
-	Enabled           bool               `json:"enabled,omitempty"`
-	MetadataSize      uint32             `json:"metadata_size,omitempty"`
-	QPS               uint32             `json:"qps,omitempty"`
-	BackoffMultiplier float64            `json:"backoff_multiplier,omitempty"`
-	MaxBackoff        badoption.Duration `json:"max_backoff,omitempty"`
-	JitterFraction    float64            `json:"jitter_fraction,omitempty"`
-}
-
-type PrefetchDNSOptions _PrefetchDNSOptions
-
-func (o PrefetchDNSOptions) MarshalJSON() ([]byte, error) {
-	if o.MetadataSize == 0 && o.QPS == 0 && o.BackoffMultiplier == 0 && o.MaxBackoff == 0 && o.JitterFraction == 0 {
-		return json.Marshal(o.Enabled)
-	}
-	return json.Marshal((_PrefetchDNSOptions)(o))
-}
-
-func (o *PrefetchDNSOptions) UnmarshalJSON(bytes []byte) error {
-	err := json.Unmarshal(bytes, &o.Enabled)
-	if err == nil {
-		return nil
-	}
-	return json.UnmarshalDisallowUnknownFields(bytes, (*_PrefetchDNSOptions)(o))
 }
 
 type _OptimisticDNSOptions struct {
@@ -175,9 +148,47 @@ func (o *DNSServerAddressOptions) ReplaceServerOptions(options ServerOptions) {
 	*o = DNSServerAddressOptions(options)
 }
 
+type HostsDNSPredefinedValue struct {
+	Addresses []netip.Addr
+	Domain    string
+}
+
+func (v HostsDNSPredefinedValue) MarshalJSON() ([]byte, error) {
+	if v.Domain != "" {
+		return json.Marshal(v.Domain)
+	}
+	switch len(v.Addresses) {
+	case 0:
+		return json.Marshal(nil)
+	case 1:
+		return json.Marshal(v.Addresses[0])
+	default:
+		return json.Marshal(v.Addresses)
+	}
+}
+
+func (v *HostsDNSPredefinedValue) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		addr, parseErr := netip.ParseAddr(s)
+		if parseErr == nil {
+			v.Addresses = []netip.Addr{addr}
+		} else {
+			v.Domain = s
+		}
+		return nil
+	}
+	var addrs []netip.Addr
+	if err := json.Unmarshal(data, &addrs); err == nil {
+		v.Addresses = addrs
+		return nil
+	}
+	return E.New("invalid predefined value: expected IP address(es) or domain name")
+}
+
 type HostsDNSServerOptions struct {
-	Path       badoption.Listable[string]                                `json:"path,omitempty"`
-	Predefined *badjson.TypedMap[string, badoption.Listable[netip.Addr]] `json:"predefined,omitempty"`
+	Path       badoption.Listable[string]                         `json:"path,omitempty"`
+	Predefined *badjson.TypedMap[string, HostsDNSPredefinedValue] `json:"predefined,omitempty"`
 }
 
 type RawLocalDNSServerOptions struct {

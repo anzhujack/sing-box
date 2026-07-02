@@ -58,10 +58,10 @@ func NewProviderInline(ctx context.Context, router adapter.Router, logFactory lo
 		ctx:     ctx,
 		logger:  logger,
 	}
-	provider.RewriteDetourForProvider(options.Outbounds)
+	provider.RewriteDetourForProvider(options.Outbounds, options.Endpoints)
 	provider.UpdateOutbounds(nil, options.Outbounds)
 	if len(options.Endpoints) > 0 {
-		provider.RewriteDetourForProviderEndpoints(options.Endpoints)
+		provider.RewriteDetourForProviderEndpoints(options.Endpoints, options.Outbounds)
 		provider.UpdateEndpoints(nil, options.Endpoints)
 	}
 	return provider, nil

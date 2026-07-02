@@ -17,7 +17,6 @@ import (
 	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/protocol/group"
-	"github.com/sagernet/sing-box/service/oomkiller"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/batch"
 	"github.com/sagernet/sing/common/memory"
@@ -32,7 +31,7 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-const APIVersion = 1
+const APIVersion = 2
 
 var _ StartedServiceServer = (*StartedService)(nil)
 
@@ -510,7 +509,7 @@ func (s *StartedService) GetClashModeStatus(ctx context.Context, empty *emptypb.
 	clashServer := s.instance.clashServer
 	s.serviceAccess.RUnlock()
 	if clashServer == nil {
-		return nil, status.Error(codes.Unimplemented, "clash mode not available")
+		return nil, status.Error(codes.NotFound, "clash mode not available")
 	}
 	return &ClashModeStatus{
 		ModeList:    clashServer.ModeList(),
@@ -537,7 +536,7 @@ func (s *StartedService) SubscribeClashMode(empty *emptypb.Empty, server grpc.Se
 		clashServer := s.instance.clashServer
 		if clashServer == nil {
 			s.serviceAccess.RUnlock()
-			return status.Error(codes.Unimplemented, "clash mode not available")
+			return status.Error(codes.NotFound, "clash mode not available")
 		}
 		message := &ClashMode{Mode: clashServer.Mode()}
 		s.serviceAccess.RUnlock()
@@ -566,7 +565,7 @@ func (s *StartedService) SetClashMode(ctx context.Context, request *ClashMode) (
 	clashServer := s.instance.clashServer
 	s.serviceAccess.RUnlock()
 	if clashServer == nil {
-		return nil, status.Error(codes.Unimplemented, "clash mode not available")
+		return nil, status.Error(codes.NotFound, "clash mode not available")
 	}
 	clashServer.SetMode(request.Mode)
 	return &emptypb.Empty{}, nil
@@ -667,18 +666,6 @@ func (s *StartedService) SetGroupExpand(ctx context.Context, request *SetGroupEx
 		}
 	}
 	return &emptypb.Empty{}, nil
-}
-
-func (s *StartedService) TriggerOOMReport(ctx context.Context, _ *emptypb.Empty) (*emptypb.Empty, error) {
-	instance := s.Instance()
-	if instance == nil {
-		return nil, status.Error(codes.FailedPrecondition, "service not started")
-	}
-	reporter := service.FromContext[oomkiller.OOMReporter](instance.ctx)
-	if reporter == nil {
-		return nil, status.Error(codes.Unavailable, "OOM reporter not available")
-	}
-	return &emptypb.Empty{}, reporter.WriteReport(memory.Total())
 }
 
 func (s *StartedService) SubscribeConnections(request *SubscribeConnectionsRequest, server grpc.ServerStreamingServer[ConnectionEvents]) error {
@@ -1498,6 +1485,12 @@ func (s *StartedService) WriteMessage(level log.Level, message string) {
 	if s.debug {
 		s.handler.WriteDebugMessage(message)
 	}
+}
+
+func (s *StartedService) SavedLog() []*log.Entry {
+	s.logAccess.RLock()
+	defer s.logAccess.RUnlock()
+	return s.logLines.Array()
 }
 
 func (s *StartedService) Instance() *Instance {

@@ -21,6 +21,7 @@ const (
 	TypeSSH                = "ssh"
 	TypeShadowTLS          = "shadowtls"
 	TypeAnyTLS             = "anytls"
+	TypeSnell              = "snell"
 	TypeShadowsocksR       = "shadowsocksr"
 	TypeVLESS              = "vless"
 	TypeTUIC               = "tuic"
@@ -34,6 +35,8 @@ const (
 	TypeCCM                = "ccm"
 	TypeOCM                = "ocm"
 	TypeOOMKiller          = "oom-killer"
+	TypeUSBIPServer        = "usbip-server"
+	TypeUSBIPClient        = "usbip-client"
 	TypeHysteriaRealm      = "hysteria-realm"
 	TypeACME               = "acme"
 	TypeCloudflareOriginCA = "cloudflare-origin-ca"
@@ -96,6 +99,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Hysteria2"
 	case TypeAnyTLS:
 		return "AnyTLS"
+	case TypeSnell:
+		return "Snell"
 	case TypeTailscale:
 		return "Tailscale"
 	case TypeCloudflared:
@@ -106,8 +111,6 @@ func ProxyDisplayName(proxyType string) string {
 		return "URLTest"
 	case TypeLoadBalance:
 		return "LoadBalance"
-	case TypeSmart:
-		return "Smart"
 	default:
 		return "Unknown"
 	}

@@ -18,8 +18,8 @@ type Conn struct {
 
 func (c *Conn) Close() error {
 	c.group.access.Lock()
+	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
-	c.group.access.Unlock()
 	return c.Conn.Close()
 }
 
@@ -41,9 +41,6 @@ type PacketConn struct {
 	element *list.Element[*groupConnItem]
 }
 
-// ReadPacket / WritePacket：当底层 PacketConn 已实现 sing 的 N.PacketReader/Writer
-// 接口时走零拷贝路径（重要：bindPacketConn、hy2 udp 包装等都依赖这个断言链）。
-// 否则降级到标准 net.PacketConn ReadFrom/WriteTo。
 func (c *PacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
 	if packetReader, ok := c.PacketConn.(N.PacketReader); ok {
 		return packetReader.ReadPacket(buffer)
@@ -66,8 +63,8 @@ func (c *PacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) er
 
 func (c *PacketConn) Close() error {
 	c.group.access.Lock()
+	defer c.group.access.Unlock()
 	c.group.connections.Remove(c.element)
-	c.group.access.Unlock()
 	return c.PacketConn.Close()
 }
 

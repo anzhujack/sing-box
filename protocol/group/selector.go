@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 	"regexp"
-	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -43,10 +42,9 @@ type Selector struct {
 	interruptGroup               *interrupt.Group
 	interruptExternalConnections bool
 
-	provider         adapter.ProviderManager
-	providers        map[string]adapter.Provider
-	outboundsCacheMu sync.Mutex
-	outboundsCache   map[string][]adapter.Outbound
+	provider       adapter.ProviderManager
+	providers      map[string]adapter.Provider
+	outboundsCache map[string][]adapter.Outbound
 
 	providerTags    []string
 	exclude         *regexp.Regexp
@@ -83,11 +81,6 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 	}
 	return outbound, nil
 }
-
-// Hidden / Icon expose the dashboard hints from option.GroupCommonOption.
-// See adapter.OutboundGroup interface for the semantic contract.
-func (s *Selector) Hidden() bool { return s.hidden }
-func (s *Selector) Icon() string { return s.icon }
 
 func (s *Selector) Network() []string {
 	selected := s.selected.Load()
@@ -147,6 +140,9 @@ func (s *Selector) Now() string {
 	}
 	return selected.Tag()
 }
+
+func (s *Selector) Hidden() bool { return s.hidden }
+func (s *Selector) Icon() string { return s.icon }
 
 func (s *Selector) All() []string {
 	return s.tags
@@ -235,7 +231,6 @@ func (s *Selector) onProviderUpdated(tag string) error {
 	for _, tag := range tags {
 		outboundByTag[tag] = s.outbounds[tag]
 	}
-	s.outboundsCacheMu.Lock()
 	for _, providerTag := range s.providerTags {
 		if providerTag != tag && s.outboundsCache[providerTag] != nil {
 			for _, detour := range s.outboundsCache[providerTag] {
@@ -260,7 +255,6 @@ func (s *Selector) onProviderUpdated(tag string) error {
 		}
 		s.outboundsCache[providerTag] = cache
 	}
-	s.outboundsCacheMu.Unlock()
 	if len(tags) == 0 {
 		detour, _ := s.outbound.Outbound("Compatible")
 		tags = append(tags, detour.Tag())

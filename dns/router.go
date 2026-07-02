@@ -82,21 +82,6 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 			optimisticTimeout = 3 * 24 * time.Hour
 		}
 	}
-	// 初始化预刷新管理器
-	var prefetchMgr *PrefetchManager
-	prefetchOptions := common.PtrValueOrDefault(options.DNSClientOptions.Prefetch)
-	if prefetchOptions.Enabled && !options.DNSClientOptions.DisableCache {
-		metadataSize := prefetchOptions.MetadataSize
-		if metadataSize == 0 {
-			metadataSize = 1024
-		}
-		qps := prefetchOptions.QPS
-		if qps == 0 {
-			qps = 10
-		}
-		prefetchMgr = NewPrefetchManager(int(metadataSize), int(qps))
-	}
-
 	router.client = NewClient(ClientOptions{
 		Context:           ctx,
 		Timeout:           time.Duration(options.DNSClientOptions.Timeout),
@@ -108,7 +93,6 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		MinCacheTTL:       options.DNSClientOptions.MinCacheTTL,
 		MaxCacheTTL:       options.DNSClientOptions.MaxCacheTTL,
 		ClientSubnet:      options.DNSClientOptions.ClientSubnet.Build(netip.Prefix{}),
-		PrefetchMgr:       prefetchMgr,
 		RDRC: func() adapter.RDRCStore {
 			cacheFile := service.FromContext[adapter.CacheFile](ctx)
 			if cacheFile == nil {
@@ -140,15 +124,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 }
 
 func (r *Router) Initialize(rules []option.DNSRule) error {
-	// 显式新分配 + clone：避免 append(rawRules[:0], …) 复用旧底层数组时，
-	// 老 DNSRule 元素（含 RuleAction/RuleSet 等闭包级引用）滞留在 cap 之内
-	// GC 不掉。Initialize 在 box.New 校验阶段被调用一次，run 阶段 reload
-	// 还可能再次调用 —— 每次都要彻底切断旧底层引用，否则同一进程内多次
-	// reload 会留下随次数线性增长的旧规则副本。
-	if oldRaw := r.rawRules; cap(oldRaw) > 0 {
-		clear(oldRaw[:cap(oldRaw)])
-	}
-	r.rawRules = append([]option.DNSRule(nil), rules...)
+	r.rawRules = append(r.rawRules[:0], rules...)
 	newRules, _, _, err := r.buildRules(false)
 	if err != nil {
 		return err
@@ -458,6 +434,9 @@ func (r *Router) exchangeWithRules(ctx context.Context, rules []adapter.DNSRule,
 	var evaluatedResponse *mDNS.Msg
 	var evaluatedTransport adapter.DNSTransport
 	for currentRuleIndex, currentRule := range rules {
+		if currentRule.Disabled() {
+			continue
+		}
 		metadata.ResetRuleCache()
 		metadata.DNSResponse = evaluatedResponse
 		metadata.DestinationAddressMatchFromResponse = false
@@ -542,8 +521,10 @@ func (r *Router) exchangeWithRules(ctx context.Context, rules []adapter.DNSRule,
 				}
 			}
 		case *R.RuleActionPredefined:
+			resp := action.Response(message)
+			resp = r.followPredefinedCNAME(ctx, message, resp, effectiveOptions)
 			return exchangeWithRulesResult{
-				response: action.Response(message),
+				response: resp,
 			}
 		}
 	}
@@ -678,7 +659,6 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 	legacyDNSMode := r.legacyDNSMode
 	r.rulesAccess.RUnlock()
 	r.logger.DebugContext(ctx, "exchange ", FormatQuestion(message.Question[0].String()))
-	startTime := time.Now()
 	var (
 		response  *mDNS.Msg
 		transport adapter.DNSTransport
@@ -745,6 +725,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 				case *R.RuleActionPredefined:
 					err = nil
 					response = action.Response(message)
+					response = r.followPredefinedCNAME(ctx, message, response, dnsOptions)
 					goto done
 				}
 			}
@@ -774,17 +755,8 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 		}
 	}
 done:
-	transportTag := ""
-	if transport != nil {
-		transportTag = transport.Tag()
-	}
-	latency := time.Since(startTime).Milliseconds()
 	if err != nil {
-		recordExternalQuery(metadata.Domain, metadata.QueryType, mDNS.RcodeServerFailure, transportTag, latency, "")
 		return nil, err
-	}
-	if response != nil {
-		recordExternalQuery(metadata.Domain, metadata.QueryType, response.Rcode, transportTag, latency, "")
 	}
 	if r.dnsReverseMapping != nil && len(message.Question) > 0 && response != nil && len(response.Answer) > 0 {
 		if transport == nil || transport.Type() != C.DNSTypeFakeIP {
@@ -868,12 +840,28 @@ func (r *Router) Lookup(ctx context.Context, domain string, options adapter.DNSQ
 						err = RcodeError(action.Rcode)
 					} else {
 						err = nil
-						for _, answer := range action.Answer {
+						fakeMsg := &mDNS.Msg{
+							Question: []mDNS.Question{{Name: mDNS.Fqdn(domain), Qtype: mDNS.TypeA, Qclass: mDNS.ClassINET}},
+						}
+						predefinedResp := action.Response(fakeMsg)
+						for _, answer := range predefinedResp.Answer {
 							switch record := answer.(type) {
 							case *mDNS.A:
 								responseAddrs = append(responseAddrs, M.AddrFromIP(record.A))
 							case *mDNS.AAAA:
 								responseAddrs = append(responseAddrs, M.AddrFromIP(record.AAAA))
+							}
+						}
+						if len(responseAddrs) == 0 {
+							if cnameTarget := findLastCNAMETarget(mDNS.Fqdn(domain), predefinedResp.Answer); cnameTarget != "" {
+								cnameOptions := options
+								cnameOptions.DisableOptimisticCache = true
+								aliasCtx, loopDetected := ContextWithAliasResolution(adapter.OverrideContext(ctx), mDNS.Fqdn(domain), cnameTarget)
+								if loopDetected {
+									r.logger.WarnContext(ctx, "predefined CNAME alias loop detected: ", domain, " -> ", FqdnToDomain(cnameTarget))
+								} else {
+									responseAddrs, err = r.Lookup(aliasCtx, FqdnToDomain(cnameTarget), cnameOptions)
+								}
 							}
 						}
 					}
@@ -926,6 +914,97 @@ func (r *Router) Rules() []adapter.DNSRule {
 func (r *Router) Rule(uuid string) (adapter.DNSRule, bool) {
 	rule, exists := r.ruleByUUID[uuid]
 	return rule, exists
+}
+
+func findLastCNAMETarget(name string, records []mDNS.RR) string {
+	current := name
+	visited := map[string]struct{}{current: {}}
+	for {
+		found := false
+		for _, rr := range records {
+			if cname, ok := rr.(*mDNS.CNAME); ok && cname.Hdr.Name == current {
+				if _, seen := visited[cname.Target]; seen {
+					return ""
+				}
+				current = cname.Target
+				visited[current] = struct{}{}
+				found = true
+				break
+			}
+		}
+		if !found {
+			break
+		}
+	}
+	if current == name {
+		return ""
+	}
+	for _, rr := range records {
+		switch rec := rr.(type) {
+		case *mDNS.A:
+			if rec.Hdr.Name == current {
+				return ""
+			}
+		case *mDNS.AAAA:
+			if rec.Hdr.Name == current {
+				return ""
+			}
+		}
+	}
+	return current
+}
+
+func (r *Router) followPredefinedCNAME(ctx context.Context, message *mDNS.Msg, response *mDNS.Msg, options adapter.DNSQueryOptions) *mDNS.Msg {
+	if len(message.Question) == 0 || response == nil {
+		return response
+	}
+	qtype := message.Question[0].Qtype
+	if qtype != mDNS.TypeA && qtype != mDNS.TypeAAAA {
+		return response
+	}
+	cnameTarget := findLastCNAMETarget(message.Question[0].Name, response.Answer)
+	if cnameTarget == "" {
+		return response
+	}
+	r.rulesAccess.RLock()
+	if r.closing {
+		r.rulesAccess.RUnlock()
+		return response
+	}
+	rules := r.rules
+	r.rulesAccess.RUnlock()
+	followMsg := &mDNS.Msg{
+		MsgHdr: mDNS.MsgHdr{RecursionDesired: true},
+		Question: []mDNS.Question{{
+			Name:   cnameTarget,
+			Qtype:  qtype,
+			Qclass: mDNS.ClassINET,
+		}},
+	}
+	followOptions := options
+	followOptions.DisableOptimisticCache = true
+	overCtx := adapter.OverrideContext(ctx)
+	aliasCtx, loopDetected := ContextWithAliasResolution(overCtx, message.Question[0].Name, cnameTarget)
+	if loopDetected {
+		r.logger.WarnContext(ctx, "predefined CNAME alias loop detected: ", FqdnToDomain(message.Question[0].Name), " -> ", FqdnToDomain(cnameTarget))
+		return response
+	}
+	followCtx := withLookupQueryMetadata(aliasCtx, qtype)
+	adapter.ContextFrom(followCtx).Domain = FqdnToDomain(cnameTarget)
+	followResult := r.exchangeWithRules(followCtx, rules, followMsg, followOptions, false)
+	if followResult.err != nil || followResult.response == nil {
+		return response
+	}
+	if followResult.response.Rcode != mDNS.RcodeSuccess || len(followResult.response.Answer) == 0 {
+		return response
+	}
+	merged := response.Copy()
+	for _, rr := range followResult.response.Answer {
+		if rr.Header().Rrtype == qtype || rr.Header().Rrtype == mDNS.TypeCNAME {
+			merged.Answer = append(merged.Answer, rr)
+		}
+	}
+	return merged
 }
 
 func (r *Router) ClearCache() {
@@ -1076,33 +1155,6 @@ func lookupDNSRuleSetMetadata(router adapter.Router, tag string, metadataOverrid
 		return adapter.RuleSetMetadata{}, E.New("rule-set not found: ", tag)
 	}
 	return ruleSet.Metadata(), nil
-}
-
-func referencedDNSRuleSetTags(rules []option.DNSRule) []string {
-	tagMap := make(map[string]bool)
-	var walkRule func(rule option.DNSRule)
-	walkRule = func(rule option.DNSRule) {
-		switch rule.Type {
-		case "", C.RuleTypeDefault:
-			for _, tag := range rule.DefaultOptions.RuleSet {
-				tagMap[tag] = true
-			}
-		case C.RuleTypeLogical:
-			for _, subRule := range rule.LogicalOptions.Rules {
-				walkRule(subRule)
-			}
-		}
-	}
-	for _, rule := range rules {
-		walkRule(rule)
-	}
-	tags := make([]string, 0, len(tagMap))
-	for tag := range tagMap {
-		if tag != "" {
-			tags = append(tags, tag)
-		}
-	}
-	return tags
 }
 
 func validateLegacyDNSModeDisabledRules(router adapter.Router, rules []option.DNSRule, metadataOverrides map[string]adapter.RuleSetMetadata) error {

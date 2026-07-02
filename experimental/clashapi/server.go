@@ -18,7 +18,6 @@ import (
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
-	boxdns "github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/experimental"
 	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/log"
@@ -43,19 +42,18 @@ func init() {
 var _ adapter.ClashServer = (*Server)(nil)
 
 type Server struct {
-	ctx             context.Context
-	network         adapter.NetworkManager
-	router          adapter.Router
-	dnsRouter       adapter.DNSRouter
-	outbound        adapter.OutboundManager
-	provider        adapter.ProviderManager
-	endpoint        adapter.EndpointManager
-	logger          log.Logger
-	httpServer      *http.Server
-	trafficManager  *trafficcontrol.Manager
-	urlTestHistory  *urltest.HistoryStorage
-	logDebug        bool
-	dnsStatsManager *DNSStatsManager
+	ctx            context.Context
+	network        adapter.NetworkManager
+	router         adapter.Router
+	dnsRouter      adapter.DNSRouter
+	outbound       adapter.OutboundManager
+	provider       adapter.ProviderManager
+	endpoint       adapter.EndpointManager
+	logger         log.Logger
+	httpServer     *http.Server
+	trafficManager *trafficcontrol.Manager
+	urlTestHistory *urltest.HistoryStorage
+	logDebug       bool
 
 	mode             string
 	modeList         []string
@@ -72,7 +70,6 @@ type Server struct {
 	lastEtag                 string
 	lastUpdated              time.Time
 	ticker                   *time.Ticker
-	dnsStatsCleanupTicker    *time.Ticker
 }
 
 func NewServer(ctx context.Context, logFactory log.ObservableFactory, options option.ClashAPIOptions) (adapter.ClashServer, error) {
@@ -85,15 +82,10 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		return nil, E.New("missing URL test history storage")
 	}
 	chiRouter := chi.NewRouter()
-	updateInterval := time.Duration(options.ExternalUIUpdateInterval)
-	if updateInterval <= 0 {
-		updateInterval = 0
-	}
+	updateInterval := max(time.Duration(options.ExternalUIUpdateInterval), 0)
 	if updateInterval > 0 && updateInterval < time.Hour {
 		updateInterval = time.Hour
 	}
-	dnsStatsManager := NewDNSStatsManager()
-	boxdns.SetQueryRecorder(dnsStatsManager)
 	s := &Server{
 		ctx:       ctx,
 		network:   service.FromContext[adapter.NetworkManager](ctx),
@@ -111,13 +103,14 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		urlTestHistory:           urlTestHistory,
 		logDebug:                 logFactory.Level() >= log.LevelDebug,
 		modeList:                 options.ModeList,
-		dnsStatsManager:          dnsStatsManager,
 		externalController:       options.ExternalController != "",
 		externalUIDownloadURL:    options.ExternalUIDownloadURL,
 		externalUIHTTPClient:     options.ExternalUIHTTPClient,
-		externalUIDownloadDetour: options.ExternalUIDownloadDetour,
 		externalUIUpdateInterval: updateInterval,
 		cacheFile:                service.FromContext[adapter.CacheFile](ctx),
+
+		//nolint:staticcheck
+		externalUIDownloadDetour: options.ExternalUIDownloadDetour,
 	}
 	defaultMode := "Rule"
 	if options.DefaultMode != "" {
@@ -159,8 +152,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Mount("/script", scriptRouter())
 		r.Mount("/profile", profileRouter())
 		r.Mount("/cache", cacheRouter(ctx))
-		r.Mount("/dns", dnsRouter(s.dnsRouter, dnsStatsManager))
-		r.Mount("/smart", smartRouter(ctx))
+		r.Mount("/dns", dnsRouter(s.dnsRouter, nil))
 
 		if service.FromContext[adapter.PlatformInterface](ctx) == nil {
 			r.Mount("/restart", restartRouter(ctx, logFactory))
@@ -198,20 +190,6 @@ func (s *Server) Start(stage adapter.StartStage) error {
 		}
 	case adapter.StartStateStarted:
 		if s.externalController {
-			if s.dnsStatsManager != nil {
-				s.dnsStatsCleanupTicker = time.NewTicker(12 * time.Hour)
-				go func() {
-					for {
-						select {
-						case <-s.ctx.Done():
-							return
-						case <-s.dnsStatsCleanupTicker.C:
-							s.dnsStatsManager.aggregator.Clear()
-							s.logger.Info("dns stats auto cleared")
-						}
-					}
-				}()
-			}
 			if s.externalUI != "" && s.externalUIUpdateInterval != 0 {
 				if s.cacheFile != nil {
 					if savedExternalUI := s.cacheFile.LoadExternalUI("ExternalUI"); savedExternalUI != nil {
@@ -271,9 +249,6 @@ func (s *Server) loopUpdate() {
 func (s *Server) Close() error {
 	if s.ticker != nil {
 		s.ticker.Stop()
-	}
-	if s.dnsStatsCleanupTicker != nil {
-		s.dnsStatsCleanupTicker.Stop()
 	}
 	return common.Close(
 		common.PtrOrNil(s.httpServer),

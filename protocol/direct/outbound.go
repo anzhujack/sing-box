@@ -47,8 +47,7 @@ type Outbound struct {
 	fallbackDelay        time.Duration
 	isEmpty              bool
 	myAddresses          common.TypedValue[[]netip.Prefix]
-	// loopBack *loopBackDetector
-	proxyProto uint8
+	proxyProto           uint8
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.DirectOutboundOptions) (adapter.Outbound, error) {
@@ -76,8 +75,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		fallbackDelay:        time.Duration(options.FallbackDelay),
 		dialer:               outboundDialer.(dialer.ParallelInterfaceDialer),
 		isEmpty:              reflect.DeepEqual(options.DialerOptions, option.DialerOptions{UDPFragmentDefault: true}),
-		// loopBack:       newLoopBackDetector(router),
-		proxyProto: options.ProxyProtocol,
+		proxyProto:           options.ProxyProtocol,
 	}
 	if options.ProxyProtocol > 2 {
 		return nil, E.New("invalid proxy protocol option: ", options.ProxyProtocol)
@@ -138,11 +136,6 @@ func (h *Outbound) DialContext(ctx context.Context, network string, destination 
 	case N.NetworkUDP:
 		h.logger.InfoContext(ctx, "outbound packet connection to ", destination)
 	}
-	/*conn, err := h.dialer.DialContext(ctx, network, destination)
-	if err != nil {
-		return nil, err
-	}
-	return h.loopBack.NewConn(conn), nil*/
 	conn, err := h.dialer.DialContext(ctx, network, destination)
 	if err != nil {
 		return nil, err

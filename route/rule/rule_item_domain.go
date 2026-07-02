@@ -19,10 +19,8 @@ type DomainItem struct {
 }
 
 func NewDomainItem(domains []string, domainSuffixes []string, domainMatchStrategy C.DomainMatchStrategy) (*DomainItem, error) {
-	for _, domainItem := range domains {
-		if domainItem == "" {
-			return nil, E.New("domain: empty item is not allowed")
-		}
+	if slices.Contains(domains, "") {
+		return nil, E.New("domain: empty item is not allowed")
 	}
 	if slices.Contains(domainSuffixes, "") {
 		return nil, E.New("domain_suffix: empty item is not allowed")

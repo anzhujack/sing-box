@@ -4,17 +4,16 @@ import (
 	"bytes"
 	"context"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	C "github.com/sagernet/sing-box/constant"
-	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/json"
-	"github.com/sagernet/sing/service"
 	"github.com/sagernet/ws"
 	"github.com/sagernet/ws/wsutil"
 
@@ -28,10 +27,6 @@ func connectionRouter(ctx context.Context, network adapter.NetworkManager, traff
 	r.Get("/", getConnections(ctx, trafficManager))
 	r.Delete("/", closeAllConnections(network, trafficManager))
 	r.Delete("/{id}", closeConnection(trafficManager))
-	// Smart-block: close the connection AND mark its upstream Smart-selected
-	// node as blocked so the group stops selecting it for a cooldown window.
-	// Mirrors mihomo's `DELETE /connections/smart/{id}`.
-	r.Delete("/smart/{id}", smartBlockConnection(ctx, trafficManager))
 	return r
 }
 
@@ -60,16 +55,16 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 		inbound = c.Metadata.InboundType
 	}
 	var domain string
-	if c.Metadata.Domain != "" {
-		domain = c.Metadata.Domain
-	} else if c.Metadata.Destination.Fqdn != "" {
+	if c.Metadata.Destination.Fqdn != "" {
 		domain = c.Metadata.Destination.Fqdn
 	} else {
-		domain = c.Metadata.SniffHost
+		domain = c.Metadata.Domain
 	}
-	var destinationAddr = c.Metadata.Destination.Addr
+	var destinationAddr netip.Addr
 	if len(c.Metadata.DestinationAddresses) > 0 {
 		destinationAddr = c.Metadata.DestinationAddresses[0]
+	} else {
+		destinationAddr = c.Metadata.Destination.Addr
 	}
 	var processPath string
 	if c.Metadata.ProcessInfo != nil {
@@ -94,6 +89,7 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 	} else {
 		rule = "final"
 	}
+	chains := trafficcontrol.TrackerMetadata(c).Chains()
 	return json.Marshal(map[string]any{
 		"id": c.ID,
 		"metadata": map[string]any{
@@ -111,7 +107,7 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 		"upload":      c.Upload.Load(),
 		"download":    c.Download.Load(),
 		"start":       c.CreatedAt,
-		"chains":      c.Chain,
+		"chains":      chains,
 		"rule":        rule,
 		"rulePayload": "",
 	})
@@ -188,86 +184,5 @@ func closeAllConnections(network adapter.NetworkManager, trafficManager *traffic
 		trafficManager.CloseAllConnections()
 		network.ResetNetwork()
 		render.NoContent(w, r)
-	}
-}
-
-// smartBlockConnection closes the connection identified by id and, if it was
-// routed through a Smart group, additionally marks the selected node as
-// blocked within that group. Looks up the group and its downstream node via
-// the connection's RealOutboundChain.
-func smartBlockConnection(ctx context.Context, trafficManager *trafficcontrol.Manager) func(w http.ResponseWriter, r *http.Request) {
-	return func(w http.ResponseWriter, r *http.Request) {
-		id := uuid.FromStringOrNil(chi.URLParam(r, "id"))
-		if id == uuid.Nil {
-			render.Status(r, http.StatusBadRequest)
-			render.JSON(w, r, ErrBadRequest)
-			return
-		}
-		targetConn := trafficManager.Connection(id)
-		if targetConn == nil {
-			render.Status(r, http.StatusNotFound)
-			render.JSON(w, r, ErrNotFound)
-			return
-		}
-		target := targetConn.Metadata()
-		targetConn.Close()
-
-		// Prefer the per-connection chain captured by the tracker. It is
-		// serialized terminal-to-root for Clash UI display, so for
-		// [..., node, smart, parent] the Smart-selected node is the
-		// previous slot. RealOutboundChain is still checked for older
-		// fork paths that explicitly recorded [smart, node].
-		type chainCandidate struct {
-			chain      []string
-			nodeOffset int
-		}
-		chains := []chainCandidate{
-			{chain: target.Metadata.GetRealOutboundChain(), nodeOffset: 1},
-			{chain: target.Chain, nodeOffset: -1},
-			{chain: target.Chain, nodeOffset: 1},
-		}
-		outboundMgr := service.FromContext[adapter.OutboundManager](ctx)
-		if outboundMgr == nil {
-			render.NoContent(w, r)
-			return
-		}
-		var blocked struct {
-			Group string `json:"group,omitempty"`
-			Node  string `json:"node,omitempty"`
-		}
-		for _, candidate := range chains {
-			chain := candidate.chain
-			for i, tag := range chain {
-				ob, ok := outboundMgr.Outbound(tag)
-				if !ok {
-					continue
-				}
-				sg, ok := ob.(*group.Smart)
-				if !ok {
-					continue
-				}
-				nodeTag := ""
-				nodeIndex := i + candidate.nodeOffset
-				if nodeIndex >= 0 && nodeIndex < len(chain) {
-					nodeTag = chain[nodeIndex]
-				}
-				if nodeTag == "" || nodeTag == tag {
-					nodeTag = sg.Now()
-				}
-				if nodeTag == "" {
-					break
-				}
-				if err := sg.MarkBlocked(nodeTag, group.DefaultBlockDuration); err == nil {
-					blocked.Group = tag
-					blocked.Node = nodeTag
-				}
-				break
-			}
-			if blocked.Group != "" {
-				break
-			}
-		}
-
-		render.JSON(w, r, blocked)
 	}
 }

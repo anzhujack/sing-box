@@ -13,7 +13,6 @@ import (
 	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/service/oomkiller"
 	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/control"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -23,8 +22,6 @@ import (
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/sing/service/filemanager"
 )
-
-var sOOMReporter oomkiller.OOMReporter
 
 func baseContext(platformInterface PlatformInterface) context.Context {
 	dnsRegistry := include.DNSTransportRegistry()
@@ -37,9 +34,6 @@ func baseContext(platformInterface PlatformInterface) context.Context {
 	}
 	ctx := context.Background()
 	ctx = filemanager.WithDefault(ctx, sWorkingPath, sTempPath, sUserID, sGroupID)
-	if sOOMReporter != nil {
-		ctx = service.ContextWith[oomkiller.OOMReporter](ctx, sOOMReporter)
-	}
 	return box.Context(ctx, include.InboundRegistry(), include.ProviderRegistry(), include.OutboundRegistry(), include.EndpointRegistry(), dnsRegistry, include.ServiceRegistry(), include.CertificateProviderRegistry())
 }
 
@@ -129,10 +123,6 @@ func (s *platformInterfaceStub) UsePlatformWIFIMonitor() bool {
 
 func (s *platformInterfaceStub) ReadWIFIState() adapter.WIFIState {
 	return adapter.WIFIState{}
-}
-
-func (s *platformInterfaceStub) SystemCertificates() []string {
-	return nil
 }
 
 func (s *platformInterfaceStub) UsePlatformConnectionOwnerFinder() bool {
@@ -238,8 +228,6 @@ func (s *interfaceMonitorStub) RegisterMyInterface(interfaceName string) {
 func (s *interfaceMonitorStub) MyInterfaces() []string {
 	return nil
 }
-
-func (s *interfaceMonitorStub) ForceUpdate() {}
 
 func FormatConfig(configContent string) (*StringBox, error) {
 	options, err := parseConfig(baseContext(nil), configContent)
