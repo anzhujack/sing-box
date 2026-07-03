@@ -68,7 +68,6 @@ func TestConnectionObjectDestinationIPUsesResolvedAddressFallback(t *testing.T) 
 	c := connectionObject(trafficcontrol.TrackerMetadata{
 		Metadata: adapter.InboundContext{
 			Network: "tcp",
-			Domain:  "example.com",
 			Destination: M.Socksaddr{
 				Addr: netip.MustParseAddr("192.0.2.1"),
 				Port: 443,
@@ -82,11 +81,5 @@ func TestConnectionObjectDestinationIPUsesResolvedAddressFallback(t *testing.T) 
 	metadata := decodeConnectionMetadata(t, c)
 	if got := metadata["destinationIP"]; got != "203.0.113.9" {
 		t.Fatalf("destinationIP = %v, want first resolved destination address", got)
-	}
-	if got := metadata["host"]; got != "example.com@203.0.113.9" {
-		t.Fatalf("host = %v, want domain decorated with resolved destination address", got)
-	}
-	if got := metadata["remoteDestination"]; got != "203.0.113.9:443" {
-		t.Fatalf("remoteDestination = %v, want resolved address with port", got)
 	}
 }

@@ -15,7 +15,6 @@ import (
 	"github.com/sagernet/sing/common"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/json"
-	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/service"
 	"github.com/sagernet/ws"
 	"github.com/sagernet/ws/wsutil"
@@ -72,16 +71,6 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 	} else {
 		destinationAddr = c.Metadata.Destination.Addr
 	}
-	displayHost := domain
-	if displayHost != "" && destinationAddr.IsValid() && displayHost != destinationAddr.String() {
-		displayHost = F.ToString(displayHost, "@", destinationAddr)
-	}
-	remoteDestination := ""
-	if destinationAddr.IsValid() {
-		remoteDestination = M.SocksaddrFrom(destinationAddr, c.Metadata.Destination.Port).String()
-	} else if c.Metadata.Destination.IsValid() {
-		remoteDestination = c.Metadata.Destination.String()
-	}
 	var processPath string
 	if c.Metadata.ProcessInfo != nil {
 		if c.Metadata.ProcessInfo.ProcessPath != "" {
@@ -109,19 +98,16 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 	return json.Marshal(map[string]any{
 		"id": c.ID,
 		"metadata": map[string]any{
-			"network":           c.Metadata.Network,
-			"type":              inbound,
-			"sourceIP":          c.Metadata.Source.Addr,
-			"destinationIP":     destinationAddr,
-			"sourcePort":        F.ToString(c.Metadata.Source.Port),
-			"destinationPort":   F.ToString(c.Metadata.Destination.Port),
-			"host":              displayHost,
-			"sniffHost":         c.Metadata.SniffHost,
-			"remoteDestination": remoteDestination,
-			"inboundName":       c.Metadata.Inbound,
-			"inboundUser":       c.Metadata.User,
-			"dnsMode":           "normal",
-			"processPath":       processPath,
+			"network":         c.Metadata.Network,
+			"type":            inbound,
+			"sourceIP":        c.Metadata.Source.Addr,
+			"destinationIP":   destinationAddr,
+			"sourcePort":      F.ToString(c.Metadata.Source.Port),
+			"destinationPort": F.ToString(c.Metadata.Destination.Port),
+			"host":            domain,
+			"sniffHost":       c.Metadata.SniffHost,
+			"dnsMode":         "normal",
+			"processPath":     processPath,
 		},
 		"upload":      c.Upload.Load(),
 		"download":    c.Download.Load(),
