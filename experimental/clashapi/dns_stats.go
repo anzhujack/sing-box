@@ -24,7 +24,7 @@ func NewDNSStatsManager() *DNSStatsManager {
 
 // Record 记录一条 DNS 查询
 func (m *DNSStatsManager) Record(domain string, qType uint16, rcode int, transport string, latency int64, clientIP string) {
-	if m.aggregator == nil {
+	if m == nil || m.aggregator == nil {
 		return
 	}
 	// latency 参数单位是毫秒
@@ -43,7 +43,7 @@ func dnsStatsRouter(statsManager *DNSStatsManager) http.Handler {
 // getSummary 获取统计摘要
 func getSummary(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if statsManager.aggregator == nil {
+		if statsManager == nil || statsManager.aggregator == nil {
 			render.Status(r, http.StatusServiceUnavailable)
 			render.JSON(w, r, newError("stats not available"))
 			return
@@ -56,7 +56,7 @@ func getSummary(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *ht
 // getQueries 获取查询列表
 func getQueries(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if statsManager.aggregator == nil {
+		if statsManager == nil || statsManager.aggregator == nil {
 			render.Status(r, http.StatusServiceUnavailable)
 			render.JSON(w, r, newError("stats not available"))
 			return
@@ -91,7 +91,7 @@ func getQueries(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *ht
 // clearStats 清空统计
 func clearStats(statsManager *DNSStatsManager) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if statsManager.aggregator == nil {
+		if statsManager == nil || statsManager.aggregator == nil {
 			render.Status(r, http.StatusServiceUnavailable)
 			render.JSON(w, r, newError("stats not available"))
 			return

@@ -237,7 +237,7 @@ func normalizeTTL(response *dns.Msg, timeToLive uint32) {
 	}
 }
 
-func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
+func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (response *dns.Msg, err error) {
 	if len(message.Question) == 0 {
 		if c.logger != nil {
 			c.logger.WarnContext(ctx, "bad question size: ", len(message.Question))
@@ -245,6 +245,18 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 		return FixedResponseStatus(message, dns.RcodeFormatError), nil
 	}
 	question := message.Question[0]
+	start := time.Now()
+	defer func() {
+		transportTag := ""
+		if transport != nil {
+			transportTag = transport.Tag()
+		}
+		rcode := dns.RcodeServerFailure
+		if response != nil {
+			rcode = response.Rcode
+		}
+		recordExternalQuery(FqdnToDomain(question.Name), question.Qtype, rcode, transportTag, time.Since(start).Milliseconds(), "")
+	}()
 	if question.Qtype == dns.TypeA && options.Strategy == C.DomainStrategyIPv6Only || question.Qtype == dns.TypeAAAA && options.Strategy == C.DomainStrategyIPv4Only {
 		if c.logger != nil {
 			c.logger.DebugContext(ctx, "strategy rejected")
@@ -304,7 +316,7 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 			return nil, ErrResponseRejectedCached
 		}
 	}
-	response, err := c.exchangeToTransport(ctx, transport, message, options.Timeout)
+	response, err = c.exchangeToTransport(ctx, transport, message, options.Timeout)
 	if err != nil {
 		return nil, err
 	}

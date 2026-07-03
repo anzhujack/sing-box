@@ -27,6 +27,8 @@ import (
 	"github.com/sagernet/sing-box/experimental"
 	"github.com/sagernet/sing-box/experimental/cachefile"
 	"github.com/sagernet/sing-box/experimental/deprecated"
+	geoxservice "github.com/sagernet/sing-box/experimental/geox"
+	smartservice "github.com/sagernet/sing-box/experimental/smart"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/direct"
@@ -446,6 +448,16 @@ func New(options Options) (*Box, error) {
 		cacheFile := cachefile.New(ctx, logFactory.NewLogger("cache-file"), common.PtrValueOrDefault(experimentalOptions.CacheFile))
 		service.MustRegister[adapter.CacheFile](ctx, cacheFile)
 		internalServices = append(internalServices, cacheFile)
+	}
+	{
+		smartService := smartservice.NewService(ctx, logFactory.NewLogger("smart"), common.PtrValueOrDefault(experimentalOptions.Smart))
+		service.MustRegister[adapter.SmartService](ctx, smartService)
+		internalServices = append(internalServices, smartService)
+	}
+	{
+		geoxService := geoxservice.NewService(ctx, logFactory.NewLogger("geox"), common.PtrValueOrDefault(experimentalOptions.GeoX))
+		service.MustRegister[adapter.GeoXService](ctx, geoxService)
+		internalServices = append(internalServices, geoxService)
 	}
 	if needClashAPI {
 		clashAPIOptions := common.PtrValueOrDefault(experimentalOptions.ClashAPI)
