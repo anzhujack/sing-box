@@ -76,6 +76,9 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 	if displayHost != "" && destinationAddr.IsValid() && displayHost != destinationAddr.String() {
 		displayHost = F.ToString(displayHost, "@", destinationAddr)
 	}
+	if displayHost != "" && c.Metadata.Source.Port != 0 {
+		displayHost = F.ToString(displayHost, "#", c.Metadata.Source.Port)
+	}
 	remoteDestination := ""
 	if destinationAddr.IsValid() {
 		remoteDestination = M.SocksaddrFrom(destinationAddr, c.Metadata.Destination.Port).String()
