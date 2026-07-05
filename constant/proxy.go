@@ -12,6 +12,7 @@ const (
 	TypeHTTP               = "http"
 	TypeMixed              = "mixed"
 	TypeShadowsocks        = "shadowsocks"
+	TypeSnell              = "snell"
 	TypeVMess              = "vmess"
 	TypeTrojan             = "trojan"
 	TypeNaive              = "naive"
@@ -21,7 +22,6 @@ const (
 	TypeSSH                = "ssh"
 	TypeShadowTLS          = "shadowtls"
 	TypeAnyTLS             = "anytls"
-	TypeSnell              = "snell"
 	TypeShadowsocksR       = "shadowsocksr"
 	TypeVLESS              = "vless"
 	TypeTUIC               = "tuic"
@@ -73,6 +73,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "Mixed"
 	case TypeShadowsocks:
 		return "Shadowsocks"
+	case TypeSnell:
+		return "Snell"
 	case TypeVMess:
 		return "VMess"
 	case TypeTrojan:
@@ -99,8 +101,6 @@ func ProxyDisplayName(proxyType string) string {
 		return "Hysteria2"
 	case TypeAnyTLS:
 		return "AnyTLS"
-	case TypeSnell:
-		return "Snell"
 	case TypeTailscale:
 		return "Tailscale"
 	case TypeCloudflared:

@@ -43,7 +43,6 @@ require (
 	github.com/pires/go-proxyproto v0.8.1
 	github.com/pkg/sftp v1.13.10
 	github.com/puzpuzpuz/xsync/v3 v3.5.1
-	github.com/reF1nd/sing-snell v0.0.8
 	github.com/sagernet/asc-go v0.0.0-20241217030726-d563060fe4e1
 	github.com/sagernet/bbolt v0.0.0-20231014093535-ea5cb2fe9f0a
 	github.com/sagernet/cors v1.2.1
@@ -54,13 +53,14 @@ require (
 	github.com/sagernet/gomobile v0.1.12
 	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1
 	github.com/sagernet/quic-go v0.59.0-sing-box-mod.4
-	github.com/sagernet/sing v0.8.12-0.20260701111927-87e1e819f10a
-	github.com/sagernet/sing-cloudflared v0.1.1
+	github.com/sagernet/sing v0.8.12-0.20260702081104-2ded2af32d3d
+	github.com/sagernet/sing-cloudflared v0.1.2
 	github.com/sagernet/sing-mux v0.3.5
 	github.com/sagernet/sing-quic v0.6.2-0.20260525051024-9467ede27fb7
 	github.com/sagernet/sing-shadowsocks v0.2.8
 	github.com/sagernet/sing-shadowsocks2 v0.2.1
 	github.com/sagernet/sing-shadowtls v0.2.1
+	github.com/sagernet/sing-snell v0.0.0-20260705044717-4e9e73be7814
 	github.com/sagernet/sing-tun v0.8.12-0.20260629021427-b3c6babbd353
 	github.com/sagernet/sing-usbip v0.0.0-20260616101517-efb91521eddb
 	github.com/sagernet/sing-vmess v0.2.8-0.20250909125414-3aed155119a1

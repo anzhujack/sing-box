@@ -497,8 +497,10 @@ func (s *SnellOption) Build() any {
 		Version:       version,
 		Reuse:         s.Reuse,
 		Network:       clashSnellNetworks(s.UDP),
-		ObfsMode:      clashStringOption(s.ObfsOpts, "mode"),
-		ObfsHost:      clashStringOption(s.ObfsOpts, "host"),
+		ObfsOptions: option.SnellObfsClientOptions{
+			ObfsMode: clashStringOption(s.ObfsOpts, "mode"),
+			ObfsHost: clashStringOption(s.ObfsOpts, "host"),
+		},
 	}
 }
 
