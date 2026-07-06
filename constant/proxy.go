@@ -111,6 +111,8 @@ func ProxyDisplayName(proxyType string) string {
 		return "URLTest"
 	case TypeLoadBalance:
 		return "LoadBalance"
+	case TypeSmart:
+		return "Smart"
 	default:
 		return "Unknown"
 	}
