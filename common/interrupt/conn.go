@@ -3,18 +3,29 @@ package interrupt
 import (
 	"net"
 
-	"github.com/sagernet/sing/common/buf"
 	"github.com/sagernet/sing/common/bufio"
-	M "github.com/sagernet/sing/common/metadata"
-	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
 )
+
+/*type GroupedConn interface {
+	MarkAsInternal()
+}
+
+func MarkAsInternal(conn any) {
+	if groupedConn, isGroupConn := common.Cast[GroupedConn](conn); isGroupConn {
+		groupedConn.MarkAsInternal()
+	}
+}*/
 
 type Conn struct {
 	net.Conn
 	group   *Group
 	element *list.Element[*groupConnItem]
 }
+
+/*func (c *Conn) MarkAsInternal() {
+	c.element.Value.internal = true
+}*/
 
 func (c *Conn) Close() error {
 	c.group.access.Lock()
@@ -41,25 +52,9 @@ type PacketConn struct {
 	element *list.Element[*groupConnItem]
 }
 
-func (c *PacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
-	if packetReader, ok := c.PacketConn.(N.PacketReader); ok {
-		return packetReader.ReadPacket(buffer)
-	}
-	_, addr, err := buffer.ReadPacketFrom(c.PacketConn)
-	if err != nil {
-		return M.Socksaddr{}, err
-	}
-	return M.SocksaddrFromNet(addr).Unwrap(), err
-}
-
-func (c *PacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	if packetWriter, ok := c.PacketConn.(N.PacketWriter); ok {
-		return packetWriter.WritePacket(buffer, destination)
-	}
-	defer buffer.Release()
-	_, err := c.PacketConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
-	return err
-}
+/*func (c *PacketConn) MarkAsInternal() {
+	c.element.Value.internal = true
+}*/
 
 func (c *PacketConn) Close() error {
 	c.group.access.Lock()

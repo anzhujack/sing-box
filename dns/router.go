@@ -15,7 +15,6 @@ import (
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
 	R "github.com/sagernet/sing-box/route/rule"
-	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
@@ -532,7 +531,7 @@ func (r *Router) exchangeWithRules(ctx context.Context, rules []adapter.DNSRule,
 			case C.RuleActionRejectMethodDrop:
 				return exchangeWithRulesResult{
 					rejectAction: action,
-					err:          tun.ErrDrop,
+					err:          R.ErrDrop,
 				}
 			}
 		case *R.RuleActionPredefined:
@@ -735,7 +734,7 @@ func (r *Router) Exchange(ctx context.Context, message *mDNS.Msg, options adapte
 							Question: []mDNS.Question{message.Question[0]},
 						}, nil
 					case C.RuleActionRejectMethodDrop:
-						return nil, tun.ErrDrop
+						return nil, R.ErrDrop
 					}
 				case *R.RuleActionPredefined:
 					err = nil

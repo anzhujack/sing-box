@@ -3,10 +3,13 @@ package adapter
 import (
 	"context"
 	"net"
+	"net/netip"
 	"time"
 
 	C "github.com/sagernet/sing-box/constant"
-	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-tun/gtcpip/header"
+	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/common/x/list"
 
@@ -16,7 +19,7 @@ import (
 type Router interface {
 	Lifecycle
 	ConnectionRouter
-	PreMatch(metadata InboundContext, context tun.DirectRouteContext, timeout time.Duration, supportBypass bool) (tun.DirectRouteDestination, error)
+	PreMatch(metadata InboundContext) PreMatchResult
 	ConnectionRouterEx
 	RuleSets() []RuleSet
 	RuleSet(tag string) (RuleSet, bool)
@@ -24,12 +27,75 @@ type Router interface {
 	NeedFindProcess() bool
 	NeedFindNeighbor() bool
 	NeighborResolver() NeighborResolver
-	Rule(uuid string) (Rule, bool)
 	AppendTracker(tracker ConnectionTracker)
 	ResetNetwork()
 	DefaultDomainMatchStrategy() C.DomainMatchStrategy
+}
 
-	Reload()
+type PreMatchAction uint8
+
+const (
+	PreMatchContinue PreMatchAction = iota
+	PreMatchFlow
+	PreMatchReject
+	PreMatchDrop
+	PreMatchBypass
+)
+
+type PreMatchResult struct {
+	Action      PreMatchAction
+	Outbound    Outbound
+	Destination netip.AddrPort
+}
+
+func JudgeFlow(router Router, inbound string, inboundType string, network uint8, source netip.AddrPort, destination netip.AddrPort) tun.FlowVerdict {
+	var networkName string
+	switch network {
+	case uint8(header.TCPProtocolNumber):
+		networkName = N.NetworkTCP
+	case uint8(header.UDPProtocolNumber):
+		networkName = N.NetworkUDP
+	case uint8(header.ICMPv4ProtocolNumber), uint8(header.ICMPv6ProtocolNumber):
+		networkName = N.NetworkICMP
+	default:
+		return tun.FlowVerdict{Action: tun.ActionAccept}
+	}
+	metadata := InboundContext{
+		Inbound:     inbound,
+		InboundType: inboundType,
+		Network:     networkName,
+		Source:      M.SocksaddrFromNetIP(source),
+		Destination: M.SocksaddrFromNetIP(destination),
+	}
+	if networkName == N.NetworkICMP {
+		metadata.Source.Port = 0
+		metadata.Destination.Port = 0
+	}
+	result := router.PreMatch(metadata)
+	switch result.Action {
+	case PreMatchFlow:
+		port, isPort := result.Outbound.(tun.Port)
+		if !isPort {
+			return tun.FlowVerdict{Action: tun.ActionAccept}
+		}
+		verdict := tun.FlowVerdict{Action: tun.ActionFlow, Port: port}
+		if result.Destination.IsValid() {
+			destinationPort := result.Destination.Port()
+			if networkName == N.NetworkICMP {
+				destinationPort = destination.Port()
+			}
+			verdict.Destination = netip.AddrPortFrom(result.Destination.Addr(), destinationPort)
+		}
+		return verdict
+	case PreMatchReject:
+		return tun.FlowVerdict{Action: tun.ActionReject}
+	case PreMatchDrop:
+		return tun.FlowVerdict{Action: tun.ActionDrop}
+	case PreMatchBypass:
+		return tun.FlowVerdict{Action: tun.ActionBypass}
+	default:
+		return tun.FlowVerdict{Action: tun.ActionAccept}
+	}
 }
 
 type ConnectionTracker interface {

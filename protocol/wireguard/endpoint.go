@@ -13,9 +13,8 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/route/rule"
 	"github.com/sagernet/sing-box/transport/wireguard"
-	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
@@ -28,7 +27,6 @@ import (
 var (
 	_ adapter.OutboundWithPreferredRoutes = (*Endpoint)(nil)
 	_ dialer.PacketDialerWithDestination  = (*Endpoint)(nil)
-	_ adapter.InterfaceUpdateListener     = (*Endpoint)(nil)
 )
 
 func RegisterEndpoint(registry *endpoint.Registry) {
@@ -37,14 +35,13 @@ func RegisterEndpoint(registry *endpoint.Registry) {
 
 type Endpoint struct {
 	endpoint.Adapter
-	ctx                  context.Context
-	router               adapter.Router
-	dnsRouter            adapter.DNSRouter
-	logger               logger.ContextLogger
-	localAddresses       []netip.Prefix
-	endpoint             *wireguard.Endpoint
-	started              atomic.Bool
-	innerDNSQueryOptions adapter.DNSQueryOptions
+	ctx            context.Context
+	router         adapter.Router
+	dnsRouter      adapter.DNSRouter
+	logger         logger.ContextLogger
+	localAddresses []netip.Prefix
+	endpoint       *wireguard.Endpoint
+	started        atomic.Bool
 }
 
 func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.WireGuardEndpointOptions) (adapter.Endpoint, error) {
@@ -76,15 +73,10 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
-	gso := options.System
-	if options.GSO != nil {
-		gso = *options.GSO
-	}
 	wgEndpoint, err := wireguard.NewEndpoint(wireguard.EndpointOptions{
 		Context:     ctx,
 		Logger:      logger,
 		System:      options.System,
-		GSO:         gso,
 		Handler:     ep,
 		UDPTimeout:  udpTimeout,
 		ICMPTimeout: C.ICMPTimeout,
@@ -122,13 +114,6 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
 		return nil, err
 	}
 	ep.endpoint = wgEndpoint
-	if options.InnerDomainResolver != nil {
-		innerDNSOpts, err := adapter.DNSQueryOptionsFrom(ctx, options.InnerDomainResolver)
-		if err != nil {
-			return nil, E.Cause(err, "inner domain resolver")
-		}
-		ep.innerDNSQueryOptions = innerDNSOpts
-	}
 	return ep, nil
 }
 
@@ -151,47 +136,45 @@ func (w *Endpoint) Close() error {
 	return w.endpoint.Close()
 }
 
-func (w *Endpoint) InterfaceUpdated() {
-	if !w.started.Load() {
-		return
-	}
-	err := w.endpoint.BindUpdate()
-	if err != nil {
-		w.logger.Warn(E.Cause(err, "update WireGuard bind after network change"))
+func (w *Endpoint) SupportsFlow(network string) bool {
+	switch network {
+	case N.NetworkTCP, N.NetworkUDP, N.NetworkICMP:
+		return true
+	default:
+		return false
 	}
 }
 
-func (w *Endpoint) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
-	if !w.started.Load() {
-		return nil, E.New("WireGuard is not ready yet")
-	}
-	var ipVersion uint8
-	if !destination.IsIPv6() {
-		ipVersion = 4
-	} else {
-		ipVersion = 6
-	}
-	routeDestination, err := w.router.PreMatch(adapter.InboundContext{
-		Inbound:     w.Tag(),
-		InboundType: w.Type(),
-		IPVersion:   ipVersion,
-		Network:     network,
-		Source:      source,
-		Destination: destination,
-	}, routeContext, timeout, false)
-	if err != nil {
-		switch {
-		case rule.IsBypassed(err):
-			err = nil
-		case rule.IsRejected(err):
-			w.logger.Trace("reject ", network, " connection from ", source.AddrString(), " to ", destination.AddrString())
-		default:
-			if network == N.NetworkICMP {
-				w.logger.Warn(E.Cause(err, "link ", network, " connection from ", source.AddrString(), " to ", destination.AddrString()))
-			}
+func (w *Endpoint) PortAddresses() (netip.Addr, netip.Addr) {
+	return w.endpoint.PortAddresses()
+}
+
+func (w *Endpoint) PortMTU() uint32 {
+	return w.endpoint.PortMTU()
+}
+
+func (w *Endpoint) AttachReturn(returnPath tun.Return) error {
+	return w.endpoint.AttachReturn(returnPath)
+}
+
+func (w *Endpoint) DetachReturn(returnPath tun.Return) error {
+	return w.endpoint.DetachReturn(returnPath)
+}
+
+func (w *Endpoint) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort) tun.FlowVerdict {
+	for _, localPrefix := range w.localAddresses {
+		if localPrefix.Contains(destination.Addr()) {
+			return tun.FlowVerdict{Action: tun.ActionAccept}
 		}
 	}
-	return routeDestination, err
+	return adapter.JudgeFlow(w.router, w.Tag(), w.Type(), network, source, destination)
+}
+
+func (w *Endpoint) WritePackets(packets [][]byte) error {
+	if !w.started.Load() {
+		return E.New("WireGuard is not ready yet")
+	}
+	return w.endpoint.WritePackets(packets)
 }
 
 func (w *Endpoint) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -249,7 +232,7 @@ func (w *Endpoint) DialContext(ctx context.Context, network string, destination 
 		return nil, E.New("WireGuard is not ready yet")
 	}
 	if destination.IsDomain() {
-		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, w.innerDNSQueryOptions)
+		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, err
 		}
@@ -266,7 +249,7 @@ func (w *Endpoint) ListenPacketWithDestination(ctx context.Context, destination 
 		return nil, netip.Addr{}, E.New("WireGuard is not ready yet")
 	}
 	if destination.IsDomain() {
-		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, w.innerDNSQueryOptions)
+		destinationAddresses, err := w.dnsRouter.Lookup(ctx, destination.Fqdn, adapter.DNSQueryOptions{})
 		if err != nil {
 			return nil, netip.Addr{}, err
 		}
@@ -302,11 +285,4 @@ func (w *Endpoint) PreferredAddress(address netip.Addr) bool {
 		return false
 	}
 	return w.endpoint.Lookup(address) != nil
-}
-
-func (w *Endpoint) NewDirectRouteConnection(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
-	if !w.started.Load() {
-		return nil, E.New("WireGuard is not ready yet")
-	}
-	return w.endpoint.NewDirectRouteConnection(metadata, routeContext, timeout)
 }

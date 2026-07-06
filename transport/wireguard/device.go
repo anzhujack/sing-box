@@ -5,8 +5,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/sagernet/sing-box/adapter"
-	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/logger"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/wireguard-go/device"
@@ -26,7 +25,6 @@ type DeviceOptions struct {
 	Context        context.Context
 	Logger         logger.ContextLogger
 	System         bool
-	GSO            bool
 	Handler        tun.Handler
 	UDPTimeout     time.Duration
 	ICMPTimeout    time.Duration
@@ -45,9 +43,4 @@ func NewDevice(options DeviceOptions) (Device, error) {
 	} else {
 		return newSystemStackDevice(options)
 	}
-}
-
-type NatDevice interface {
-	Device
-	CreateDestination(metadata adapter.InboundContext, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error)
 }

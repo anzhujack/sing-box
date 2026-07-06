@@ -14,7 +14,7 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/sniff"
-	tf "github.com/sagernet/sing-box/common/tlsfragment"
+	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing/common"
@@ -113,9 +113,6 @@ func (m *ConnectionManager) NewConnection(ctx context.Context, this N.Dialer, co
 		var dialerString string
 		if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 			dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-			if outbound.Type() == C.TypeLoadBalance {
-				dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
-			}
 		}
 		err = E.Cause(err, "open connection to ", remoteString, dialerString)
 		N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -191,9 +188,6 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			var dialerString string
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-				if outbound.Type() == C.TypeLoadBalance {
-					dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
-				}
 			}
 			err = E.Cause(err, "open packet connection to ", remoteString, dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
@@ -217,11 +211,8 @@ func (m *ConnectionManager) NewPacketConnection(ctx context.Context, this N.Dial
 			var dialerString string
 			if outbound, isOutbound := this.(adapter.Outbound); isOutbound {
 				dialerString = " using outbound/" + outbound.Type() + "[" + outbound.Tag() + "]"
-				if outbound.Type() == C.TypeLoadBalance {
-					dialerString += "[" + strings.Join(metadata.GetRealOutboundChain(), " -> ") + "]"
-				}
 			}
-			err = E.Cause(err, "listen packet connection", dialerString)
+			err = E.Cause(err, "listen packet connection using ", dialerString)
 			N.CloseOnHandshakeFailure(conn, onClose, err)
 			m.logger.ErrorContext(ctx, err)
 			return
@@ -430,26 +421,6 @@ type trackedPacketConn struct {
 	net.PacketConn
 	manager *ConnectionManager
 	element *list.Element[io.Closer]
-}
-
-func (c *trackedPacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
-	if packetReader, ok := c.PacketConn.(N.PacketReader); ok {
-		return packetReader.ReadPacket(buffer)
-	}
-	_, addr, err := buffer.ReadPacketFrom(c.PacketConn)
-	if err != nil {
-		return M.Socksaddr{}, err
-	}
-	return M.SocksaddrFromNet(addr).Unwrap(), err
-}
-
-func (c *trackedPacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	if packetWriter, ok := c.PacketConn.(N.PacketWriter); ok {
-		return packetWriter.WritePacket(buffer, destination)
-	}
-	defer buffer.Release()
-	_, err := c.PacketConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
-	return err
 }
 
 func (c *trackedPacketConn) Close() error {

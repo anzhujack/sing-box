@@ -89,8 +89,6 @@ type DialerOptions struct {
 	FallbackNetworkType  badoption.Listable[InterfaceType] `json:"fallback_network_type,omitempty"`
 	FallbackDelay        badoption.Duration                `json:"fallback_delay,omitempty"`
 
-	ResolverOnDetour bool `json:"resolve_on_detour,omitempty"`
-
 	// Deprecated: migrated to domain resolver
 	DomainStrategy DomainStrategy `json:"domain_strategy,omitempty"`
 }

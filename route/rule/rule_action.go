@@ -14,7 +14,6 @@ import (
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
-	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	F "github.com/sagernet/sing/common/format"
@@ -108,8 +107,6 @@ func NewRuleAction(ctx context.Context, logger logger.ContextLogger, action opti
 			Timeout:      time.Duration(action.SniffOptions.Timeout),
 		}
 		return sniffAction, sniffAction.build()
-	case C.RuleActionTypeSniffOverrideDestination:
-		return &RuleActionSniffOverrideDestination{}, nil
 	case C.RuleActionTypeResolve:
 		return &RuleActionResolve{
 			Server:                 action.ResolveOptions.Server,
@@ -392,6 +389,11 @@ func (r *RuleActionDirect) String() string {
 	return "direct" + r.description
 }
 
+var (
+	ErrReset = E.New("connection reset")
+	ErrDrop  = E.New("packet dropped")
+)
+
 type RejectedError struct {
 	Cause error
 }
@@ -450,9 +452,9 @@ func (r *RuleActionReject) Error(ctx context.Context) error {
 	var returnErr error
 	switch r.Method {
 	case C.RuleActionRejectMethodDefault:
-		returnErr = &RejectedError{tun.ErrReset}
+		returnErr = &RejectedError{ErrReset}
 	case C.RuleActionRejectMethodDrop:
-		return &RejectedError{tun.ErrDrop}
+		return &RejectedError{ErrDrop}
 	case C.RuleActionRejectMethodReply:
 		return nil
 	default:
@@ -472,7 +474,7 @@ func (r *RuleActionReject) Error(ctx context.Context) error {
 		if ctx != nil {
 			r.logger.DebugContext(ctx, "dropped due to flooding")
 		}
-		return &RejectedError{tun.ErrDrop}
+		return &RejectedError{ErrDrop}
 	}
 	return returnErr
 }
@@ -492,6 +494,8 @@ type RuleActionSniff struct {
 	StreamSniffers []sniff.StreamSniffer
 	PacketSniffers []sniff.PacketSniffer
 	Timeout        time.Duration
+	// Deprecated
+	OverrideDestination bool
 }
 
 func (r *RuleActionSniff) Type() string {
@@ -507,7 +511,6 @@ func (r *RuleActionSniff) build() error {
 			r.StreamSniffers = append(r.StreamSniffers, sniff.HTTPHost)
 		case C.ProtocolQUIC:
 			r.PacketSniffers = append(r.PacketSniffers, sniff.QUICClientHello)
-			r.PacketSniffers = append(r.PacketSniffers, sniff.QUICShortHeader)
 		case C.ProtocolDNS:
 			r.StreamSniffers = append(r.StreamSniffers, sniff.StreamDomainNameQuery)
 			r.PacketSniffers = append(r.PacketSniffers, sniff.DomainNameQuery)
@@ -542,16 +545,6 @@ func (r *RuleActionSniff) String() string {
 	} else {
 		return F.ToString("sniff(", strings.Join(r.SnifferNames, ","), ",", r.Timeout.String(), ")")
 	}
-}
-
-type RuleActionSniffOverrideDestination struct{}
-
-func (r *RuleActionSniffOverrideDestination) Type() string {
-	return C.RuleActionTypeSniffOverrideDestination
-}
-
-func (r *RuleActionSniffOverrideDestination) String() string {
-	return "sniff-override-destination"
 }
 
 type RuleActionResolve struct {

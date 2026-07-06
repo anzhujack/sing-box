@@ -150,7 +150,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Get("/version", version)
 		r.Mount("/configs", configRouter(s, logFactory))
 		r.Mount("/proxies", proxyRouter(s, s.router))
-		r.Mount("/rules", ruleRouter(s.router, s.dnsRouter))
+		r.Mount("/rules", ruleRouter(s.router))
 		r.Mount("/connections", connectionRouter(s.ctx, s.network, trafficManager))
 		r.Mount("/providers/proxies", proxyProviderRouter(s))
 		r.Mount("/providers/rules", ruleProviderRouter(s.router))
@@ -159,10 +159,6 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Mount("/cache", cacheRouter(ctx))
 		r.Mount("/dns", dnsRouter(s.dnsRouter, dnsStatsManager))
 		r.Mount("/smart", smartRouter(ctx))
-
-		if service.FromContext[adapter.PlatformInterface](ctx) == nil {
-			r.Mount("/restart", restartRouter(ctx, logFactory))
-		}
 
 		s.setupMetaAPI(r)
 	})
@@ -301,8 +297,9 @@ func (s *Server) SetMode(newMode string) {
 	}
 	s.modeUpdateAccess.Unlock()
 	s.dnsRouter.ClearCache()
-	if s.cacheFile != nil {
-		err := s.cacheFile.StoreMode(newMode)
+	cacheFile := service.FromContext[adapter.CacheFile](s.ctx)
+	if cacheFile != nil {
+		err := cacheFile.StoreMode(newMode)
 		if err != nil {
 			s.logger.Error(E.Cause(err, "save mode"))
 		}

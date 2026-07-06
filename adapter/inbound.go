@@ -58,6 +58,7 @@ type InboundContext struct {
 
 	Protocol     string
 	SniffHost    string
+	Domain       string
 	Client       string
 	SniffContext any
 	SnifferNames []string
@@ -66,7 +67,6 @@ type InboundContext struct {
 	// cache
 
 	CacheIPs []netip.Addr
-	Domain   string
 
 	// Deprecated: implement in rule action
 	InboundDetour             string

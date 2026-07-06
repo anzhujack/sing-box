@@ -56,38 +56,7 @@ type NetworkManager struct {
 	wifiMonitor            settings.WIFIMonitor
 	wifiState              adapter.WIFIState
 	wifiStateMutex         sync.RWMutex
-	resetCallbackAccess    sync.Mutex
-	resetCallbacks         []func()
-
-	// Reset-coalescence state. Android's ConnectivityManager fires
-	// 5-15 callbacks during a single Wi-Fi ↔ cellular handoff (burst
-	// window ~200ms-2s: interfaceAdded / defaultChanged /
-	// linkProperties / IP change / route-table update ...). Firing a
-	// full ResetNetwork per callback means:
-	//
-	//   - connectionManager.CloseAll() × N → thousands of conn
-	//     Close() each recursing into recordStats + bbolt writes
-	//   - every QUIC outbound's CloseWithError × N → tearing sessions
-	//     that were re-dialed between callbacks
-	//   - every Smart group's InterfaceUpdated × N → warm-up storm
-	//
-	// The net effect on a 15-group / 1000-conn config: CPU 100% for
-	// several seconds, heap growth tens of MBs, UI freeze.
-	//
-	// Timer coalescence is strictly better than a fire-on-first CAS
-	// window:
-	//   CAS-window:  first callback wins, rest swallowed. Issue: first
-	//                callback is "WiFi lost" — routing table is mid-
-	//                transition and the Reset often rebuilds against
-	//                a not-yet-valid new default interface.
-	//   Timer-coalesce: every callback resets a timer; Reset fires
-	//                only after all callbacks have been quiet for
-	//                resetCoalesceDelay — by then the OS has settled
-	//                on the new interface. The burst triggers exactly
-	//                one Reset, always, against the final state.
-	resetCoalesceMu    sync.Mutex
-	resetCoalesceTimer *time.Timer
-	started            bool
+	started                bool
 }
 
 func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options option.RouteOptions, dnsOptions option.DNSOptions) (*NetworkManager, error) {
@@ -380,45 +349,24 @@ func (r *NetworkManager) AutoDetectInterfaceFunc() control.Func {
 				return r.platformInterface.AutoDetectInterfaceControl(int(fd))
 			})
 		}
-	}
-	if r.interfaceMonitor == nil {
-		return nil
-	}
-	// 直接构造 control.Func，而不走 control.BindToInterfaceFunc：
-	// BindToInterfaceFunc 在 (name=="" && index==-1) 时必报 "interface not found"，
-	// 这是我们要规避的硬失败路径。
-	//
-	// 策略：
-	//   1) 目的地属于某个本地接口 → bind 该接口（原语义保持）；
-	//   2) monitor 追踪到默认接口 → bind 默认接口；
-	//   3) monitor 快照为 nil（尚未追上切网事件）→ 不 bind，交给内核 FIB 自己
-	//      选路。这样"用户态预测"失效时还有内核兜底，避免"有网但报 no route
-	//      to internet"的刷屏；dial 若真的不通，内核返回的 ENETUNREACH/
-	//      EHOSTUNREACH 会由 HintUnreachable 反馈 monitor 重探。
-	return func(network, address string, conn syscall.RawConn) error {
-		remoteAddr := M.ParseSocksaddr(address).Addr
-		if remoteAddr.IsValid() {
-			if iif, err := r.interfaceFinder.ByAddr(remoteAddr); err == nil {
-				return control.BindToInterface0(r.interfaceFinder, conn, network, address, iif.Name, iif.Index, false)
-			}
-		}
-		defaultInterface := r.interfaceMonitor.DefaultInterface()
-		if defaultInterface == nil {
+	} else {
+		if r.interfaceMonitor == nil {
 			return nil
 		}
-		return control.BindToInterface0(r.interfaceFinder, conn, network, address, defaultInterface.Name, defaultInterface.Index, false)
-	}
-}
-
-// HintUnreachable 见 adapter.NetworkManager。零开销合并触发 monitor 重探。
-// 上游 sing-tun 没有 ForceUpdate；只有 fork 自定义 monitor 实现该方法。
-// 通过接口断言：能力存在则调用，缺失则 no-op（依赖原生 debounce 自然收敛）。
-func (r *NetworkManager) HintUnreachable() {
-	if r.interfaceMonitor == nil {
-		return
-	}
-	if forceUpdater, ok := r.interfaceMonitor.(interface{ ForceUpdate() }); ok {
-		forceUpdater.ForceUpdate()
+		return control.BindToInterfaceFunc(r.interfaceFinder, func(network string, address string) (interfaceName string, interfaceIndex int, err error) {
+			remoteAddr := M.ParseSocksaddr(address).Addr
+			if remoteAddr.IsValid() {
+				iif, err := r.interfaceFinder.ByAddr(remoteAddr)
+				if err == nil {
+					return iif.Name, iif.Index, nil
+				}
+			}
+			defaultInterface := r.interfaceMonitor.DefaultInterface()
+			if defaultInterface == nil {
+				return "", -1, tun.ErrNoRoute
+			}
+			return defaultInterface.Name, defaultInterface.Index, nil
+		})
 	}
 }
 
@@ -534,18 +482,16 @@ func (r *NetworkManager) ResetNetwork() {
 		}
 	}
 
-	r.resetCallbackAccess.Lock()
-	callbacks := r.resetCallbacks
-	r.resetCallbackAccess.Unlock()
-	for _, callback := range callbacks {
-		callback()
-	}
+	r.router.ResetNetwork()
 }
 
-func (r *NetworkManager) RegisterNetworkResetCallback(callback func()) {
-	r.resetCallbackAccess.Lock()
-	defer r.resetCallbackAccess.Unlock()
-	r.resetCallbacks = append(r.resetCallbacks, callback)
+func (r *NetworkManager) HintUnreachable() {
+	if r.interfaceMonitor == nil {
+		return
+	}
+	if forceUpdater, ok := r.interfaceMonitor.(interface{ ForceUpdate() }); ok {
+		forceUpdater.ForceUpdate()
+	}
 }
 
 func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interface, flags int) {
@@ -588,46 +534,7 @@ func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interfa
 	if !r.started {
 		return
 	}
-	// Coalesce into a single deferred ResetNetwork. Callback returns
-	// immediately; a background timer will fire the actual reset
-	// resetCoalesceDelay after the LAST callback in a burst.
-	r.scheduleReset()
-}
-
-// resetCoalesceDelay is the quiet-window length after the last
-// notifyInterfaceUpdate callback before ResetNetwork actually
-// fires. Android WiFi↔cellular handoff empirical burst is
-// 200ms-2s; 1.5s gives us headroom while keeping end-to-end
-// recovery snappy.
-const resetCoalesceDelay = 1500 * time.Millisecond
-
-// scheduleReset arms (or re-arms) the coalescence timer. Runs on
-// whatever goroutine delivered the callback; holds the coalescence
-// mutex for microseconds. The timer's AfterFunc callback executes
-// on its own goroutine so ResetNetwork doesn't block the callback
-// delivery path.
-//
-// Semantics: every call pushes the fire moment out by
-// resetCoalesceDelay. Once the burst is quiet for the delay, one
-// Reset fires. Guaranteed to produce EXACTLY ONE Reset per burst,
-// against the settled post-burst state.
-func (r *NetworkManager) scheduleReset() {
-	r.resetCoalesceMu.Lock()
-	defer r.resetCoalesceMu.Unlock()
-	if r.resetCoalesceTimer != nil {
-		// Active pending reset — just push it further out.
-		if r.resetCoalesceTimer.Reset(resetCoalesceDelay) {
-			return
-		}
-		// Reset returned false → timer already fired or was
-		// stopped; fall through to create a fresh one below.
-	}
-	r.resetCoalesceTimer = time.AfterFunc(resetCoalesceDelay, func() {
-		r.resetCoalesceMu.Lock()
-		r.resetCoalesceTimer = nil
-		r.resetCoalesceMu.Unlock()
-		r.ResetNetwork()
-	})
+	r.ResetNetwork()
 }
 
 func (r *NetworkManager) notifyWindowsPowerEvent(event int) {

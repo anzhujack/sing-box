@@ -23,17 +23,17 @@ func NewGroup() *Group {
 	return &Group{}
 }
 
-func (g *Group) NewConn(conn net.Conn, isExternal, isProvider bool) net.Conn {
+func (g *Group) NewConn(conn net.Conn, isExternal bool, isProvider ...bool) net.Conn {
 	g.access.Lock()
 	defer g.access.Unlock()
-	item := g.connections.PushBack(&groupConnItem{conn, isExternal, isProvider})
+	item := g.connections.PushBack(&groupConnItem{conn: conn, isExternal: isExternal, isProvider: len(isProvider) > 0 && isProvider[0]})
 	return &Conn{Conn: conn, group: g, element: item}
 }
 
-func (g *Group) NewPacketConn(conn net.PacketConn, isExternal, isProvider bool) net.PacketConn {
+func (g *Group) NewPacketConn(conn net.PacketConn, isExternal bool, isProvider ...bool) net.PacketConn {
 	g.access.Lock()
 	defer g.access.Unlock()
-	item := g.connections.PushBack(&groupConnItem{conn, isExternal, isProvider})
+	item := g.connections.PushBack(&groupConnItem{conn: conn, isExternal: isExternal, isProvider: len(isProvider) > 0 && isProvider[0]})
 	return &PacketConn{PacketConn: conn, group: g, element: item}
 }
 

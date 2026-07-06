@@ -8,7 +8,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -17,8 +16,7 @@ import (
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
-	"github.com/sagernet/sing-box/route/rule"
-	tun "github.com/sagernet/sing-tun"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
 	"github.com/sagernet/sing/common/json/badoption"
@@ -54,7 +52,6 @@ type Inbound struct {
 	routeRuleSetCallback        []*list.Element[adapter.RuleSetUpdateCallback]
 	routeExcludeRuleSet         []adapter.RuleSet
 	routeExcludeRuleSetCallback []*list.Element[adapter.RuleSetUpdateCallback]
-	routeAddressMu              sync.Mutex
 	routeAddressSet             []*netipx.IPSet
 	routeExcludeAddressSet      []*netipx.IPSet
 }
@@ -101,7 +98,6 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 
 	platformInterface := service.FromContext[adapter.PlatformInterface](ctx)
 	tunMTU := options.MTU
-	enableGSO := C.IsLinux && options.Stack == "gvisor" && platformInterface == nil && tunMTU > 0 && tunMTU < 49152
 	if tunMTU == 0 {
 		if platformInterface != nil && platformInterface.UnderNetworkExtension() {
 			// In Network Extension, when MTU exceeds 4064 (4096-UTUN_IF_HEADROOM_SIZE), the performance of tun will drop significantly, which may be a system bug.
@@ -112,6 +108,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		} else {
 			tunMTU = 65535
 		}
+	}
+	var enableGSO bool
+	if C.IsLinux && platformInterface == nil {
+		enableGSO = (options.Stack == "gvisor" && tunMTU < 49152)
 	}
 	var udpTimeout time.Duration
 	if options.UDPTimeout != 0 {
@@ -180,7 +180,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		excludeMACAddress = append(excludeMACAddress, mac)
 	}
 	networkManager := service.FromContext[adapter.NetworkManager](ctx)
-	multiPendingPackets := C.IsDarwin && ((options.Stack == "gvisor" && tunMTU < 32768) || (options.Stack != "gvisor" && options.MTU <= 9000))
+	multiPendingPackets := C.IsDarwin && ((options.Stack == "gvisor" && tunMTU < 32768) || (options.Stack != "gvisor" && tunMTU <= 9000))
 	inbound := &Inbound{
 		tag:            tag,
 		ctx:            ctx,
@@ -262,10 +262,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		if err != nil {
 			return nil, E.Cause(err, "initialize auto-redirect")
 		}
-		if options.AutoRedirectDisableMarkMode && (len(inbound.routeRuleSet) > 0 || len(inbound.routeExcludeRuleSet) > 0) {
-			return nil, E.New("`auto_redirect` mark mode cannot be disabled with `route_address_set` or `route_exclude_address_set`")
-		}
-		if !C.IsAndroid && !options.AutoRedirectDisableMarkMode {
+		if !C.IsAndroid {
 			inbound.tunOptions.AutoRedirectMarkMode = true
 			err = networkManager.RegisterAutoRedirectOutputMark(inbound.tunOptions.AutoRedirectOutputMark)
 			if err != nil {
@@ -325,6 +322,22 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 			t.dnsHijackAddress = append(inet4DNSAddress, inet6DNSAddress...)
 		}
 	case adapter.StartStateStart:
+		if t.platformInterface == nil &&
+			((C.IsLinux && !t.tunOptions.GSO) || (C.IsDarwin && !t.tunOptions.EXP_MultiPendingPackets)) {
+			endpointManager := service.FromContext[adapter.EndpointManager](t.ctx)
+			if endpointManager != nil {
+				for _, managedEndpoint := range endpointManager.Endpoints() {
+					if _, isFlowOutbound := managedEndpoint.(adapter.FlowOutbound); isFlowOutbound {
+						if C.IsLinux {
+							t.tunOptions.GSO = true
+						} else {
+							t.tunOptions.EXP_MultiPendingPackets = true
+						}
+						break
+					}
+				}
+			}
+		}
 		if C.IsAndroid && t.platformInterface == nil {
 			t.tunOptions.BuildAndroidRules(t.networkManager.PackageManager())
 		}
@@ -427,15 +440,7 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 		err := t.tunStack.Start()
 		monitor.Finish()
 		if err != nil {
-			// IPv6 bind 失败（`bind: cannot assign requested address` 或
-			// `address family not supported`）在纯 IPv4 主机 / 容器里很常见 —
-			// Box.Start 不应因此 fatal。记 warn 继续；已建立的 IPv4 stack
-			// 仍然能用，用户 IPv6 流量会走 direct/fallback 路由。
-			if isIPv6BindFailure(err) {
-				t.logger.Warn("tun stack IPv6 bind failed, continuing with IPv4-only: ", err)
-			} else {
-				return E.Cause(err, "starting tun stack")
-			}
+			return E.Cause(err, "starting tun stack")
 		}
 		monitor.Start("starting tun interface")
 		err = t.tunIf.Start()
@@ -451,17 +456,13 @@ func (t *Inbound) Start(stage adapter.StartStage) error {
 				return E.Cause(err, "auto-redirect")
 			}
 		}
-		t.routeAddressMu.Lock()
 		t.routeAddressSet = nil
 		t.routeExcludeAddressSet = nil
-		t.routeAddressMu.Unlock()
 	}
 	return nil
 }
 
 func (t *Inbound) updateRouteAddressSet(it adapter.RuleSet) {
-	t.routeAddressMu.Lock()
-	defer t.routeAddressMu.Unlock()
 	t.routeAddressSet = common.FlatMap(t.routeRuleSet, adapter.RuleSet.ExtractIPSet)
 	t.routeExcludeAddressSet = common.FlatMap(t.routeExcludeRuleSet, adapter.RuleSet.ExtractIPSet)
 	t.autoRedirect.UpdateRouteAddressSet()
@@ -470,22 +471,6 @@ func (t *Inbound) updateRouteAddressSet(it adapter.RuleSet) {
 }
 
 func (t *Inbound) Close() error {
-	for i, callback := range t.routeRuleSetCallback {
-		t.routeRuleSet[i].UnregisterCallback(callback)
-	}
-	t.routeRuleSetCallback = nil
-	for i, callback := range t.routeExcludeRuleSetCallback {
-		t.routeExcludeRuleSet[i].UnregisterCallback(callback)
-	}
-	t.routeExcludeRuleSetCallback = nil
-	for _, ruleSet := range t.routeRuleSet {
-		ruleSet.DecRef()
-	}
-	t.routeRuleSet = nil
-	for _, ruleSet := range t.routeExcludeRuleSet {
-		ruleSet.DecRef()
-	}
-	t.routeExcludeRuleSet = nil
 	return common.Close(
 		t.tunStack,
 		t.tunIf,
@@ -493,34 +478,8 @@ func (t *Inbound) Close() error {
 	)
 }
 
-func (t *Inbound) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
-	var ipVersion uint8
-	if !destination.IsIPv6() {
-		ipVersion = 4
-	} else {
-		ipVersion = 6
-	}
-	routeDestination, err := t.router.PreMatch(adapter.InboundContext{
-		Inbound:     t.tag,
-		InboundType: C.TypeTun,
-		IPVersion:   ipVersion,
-		Network:     network,
-		Source:      source,
-		Destination: destination,
-	}, routeContext, timeout, false)
-	if err != nil {
-		switch {
-		case rule.IsBypassed(err):
-			err = nil
-		case rule.IsRejected(err):
-			t.logger.Trace("reject ", network, " connection from ", source.AddrString(), " to ", destination.AddrString())
-		default:
-			if network == N.NetworkICMP {
-				t.logger.Warn(E.Cause(err, "link ", network, " connection from ", source.AddrString(), " to ", destination.AddrString()))
-			}
-		}
-	}
-	return routeDestination, err
+func (t *Inbound) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort) tun.FlowVerdict {
+	return adapter.JudgeFlow(t.router, t.tag, C.TypeTun, network, source, destination)
 }
 
 func (t *Inbound) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
@@ -567,41 +526,15 @@ func (t *Inbound) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, 
 
 type autoRedirectHandler Inbound
 
-func (t *autoRedirectHandler) PrepareConnection(network string, source M.Socksaddr, destination M.Socksaddr, routeContext tun.DirectRouteContext, timeout time.Duration) (tun.DirectRouteDestination, error) {
-	var ipVersion uint8
-	if !destination.IsIPv6() {
-		ipVersion = 4
-	} else {
-		ipVersion = 6
-	}
-	routeDestination, err := t.router.PreMatch(adapter.InboundContext{
-		Inbound:     t.tag,
-		InboundType: C.TypeTun,
-		IPVersion:   ipVersion,
-		Network:     network,
-		Source:      source,
-		Destination: destination,
-	}, routeContext, timeout, true)
-	if err != nil {
-		switch {
-		case rule.IsBypassed(err):
-			t.logger.Trace("bypass ", network, " connection from ", source.AddrString(), " to ", destination.AddrString())
-		case rule.IsRejected(err):
-			t.logger.Trace("reject ", network, " connection from ", source.AddrString(), " to ", destination.AddrString())
-		default:
-			if network == N.NetworkICMP {
-				t.logger.Warn(E.Cause(err, "link ", network, " connection from ", source.AddrString(), " to ", destination.AddrString()))
-			}
-		}
-	}
-	return routeDestination, err
+func (t *autoRedirectHandler) JudgeFlow(network uint8, source netip.AddrPort, destination netip.AddrPort) tun.FlowVerdict {
+	return (*Inbound)(t).JudgeFlow(network, source, destination)
 }
 
 func (t *autoRedirectHandler) NewConnectionEx(ctx context.Context, conn net.Conn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
 	ctx = log.ContextWithNewID(ctx)
 	var metadata adapter.InboundContext
 	metadata.Inbound = t.tag
-	metadata.InboundType = C.TypeRedirect
+	metadata.InboundType = C.TypeTun
 	metadata.Source = source
 	metadata.Destination = destination
 	for _, dnsHijackAddress := range t.dnsHijackAddress {
@@ -619,36 +552,5 @@ func (t *autoRedirectHandler) NewConnectionEx(ctx context.Context, conn net.Conn
 }
 
 func (t *autoRedirectHandler) NewPacketConnectionEx(ctx context.Context, conn N.PacketConn, source M.Socksaddr, destination M.Socksaddr, onClose N.CloseHandlerFunc) {
-	t.logger.Error("unexpected packet connection in auto-redirect handler from ", source)
-	N.CloseOnHandshakeFailure(conn, onClose, os.ErrInvalid)
-}
-
-// isIPv6BindFailure 返回 err 是否是"本机没有 IPv6 地址族可用"导致的
-// bind 失败。典型触发:
-//   - 容器/VPS 禁用 IPv6 (sysctl net.ipv6.conf.*.disable_ipv6=1)
-//   - 云服务没给 instance 分配 IPv6 但路由表仍有 ::1
-//   - Android 某些 ROM VPN Service 不提供 IPv6 路由
-//
-// 这些场景下 IPv4 tun stack 本身能正常起。把 IPv6 bind 错误降级为 warn
-// 而不是 fatal 是合理的默认 —— 用户配置了 inet6_address 只是在"可用时"
-// 想要 IPv6；否则整个 sing-box 都起不来会让配置在有/无 IPv6 的机器间不
-// 可移植。
-//
-// 保守匹配：只认 "cannot assign requested address" 和
-// "address family not supported" 这两个典型错误串，其他 bind 错误（端口
-// 被占、权限不足）仍然上报 fatal，避免把严重问题吞掉。
-func isIPv6BindFailure(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	// Linux EADDRNOTAVAIL + macOS/Windows 等价描述
-	if strings.Contains(s, "cannot assign requested address") {
-		return true
-	}
-	// Linux EAFNOSUPPORT — 内核编译时禁了 IPv6
-	if strings.Contains(s, "address family not supported") {
-		return true
-	}
-	return false
+	panic("unexcepted")
 }
