@@ -25,6 +25,12 @@ import (
 	"github.com/sagernet/sing/service/pause"
 )
 
+const (
+	ruleSetInitialRetryInterval = 60 * time.Second
+	ruleSetFetchTimeout         = 60 * time.Second
+	ruleSetMaxResponseBytes     = 50 * 1024 * 1024
+)
+
 var _ adapter.RuleSet = (*RemoteRuleSet)(nil)
 
 type RemoteRuleSet struct {
@@ -86,25 +92,36 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
 	if err = s.loadCacheFile(); err != nil {
-		s.logger.Warn(E.Cause(err, "restore cached rule-set, will refetch"))
+		s.logger.Warn(E.Cause(err, "restore cached rule-set, discarding stale cache and refetching"))
+		s.hash = hash.HashType{}
+		s.lastEtag = ""
+		s.lastUpdated = time.Time{}
+		if s.cacheFile != nil {
+			if saveErr := s.cacheFile.SaveRuleSet(s.tag, &adapter.SavedBinary{}); saveErr != nil {
+				s.logger.Debug("evict stale rule-set cache ", s.tag, ": ", saveErr)
+			}
+		}
 	}
 	if s.UpdatedTime().IsZero() {
 		err = s.fetch(ctx, true)
 		if err != nil {
-			return E.Cause(err, "initial rule-set: ", s.tag)
+			s.logger.Warn("initial rule-set ", s.tag, " fetch failed: ", err, " — starting empty and retrying in ", ruleSetInitialRetryInterval)
 		}
 	}
 	return nil
 }
 
-func (s *RemoteRuleSet) update() {
+func (s *RemoteRuleSet) update() bool {
 	ctx := log.ContextWithNewID(s.ctx)
 	err := s.fetch(ctx, false)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "fetch rule-set ", s.tag, ": ", err)
-	} else if s.refs.Load() == 0 {
+		return false
+	}
+	if s.refs.Load() == 0 {
 		s.rules = nil
 	}
+	return true
 }
 
 func (s *RemoteRuleSet) Update(ctx context.Context) error {
@@ -123,7 +140,9 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	}
 	defer s.updating.Store(false)
 	s.logger.DebugContext(ctx, "updating rule-set ", s.tag, " from URL: ", s.url)
-	request, err := http.NewRequest("GET", s.url, nil)
+	requestCtx, cancel := context.WithTimeout(ctx, ruleSetFetchTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, s.url, nil)
 	if err != nil {
 		return err
 	}
@@ -133,7 +152,7 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	if !isStart {
 		defer s.httpClient.CloseIdleConnections()
 	}
-	response, err := s.httpClient.Do(request.WithContext(ctx))
+	response, err := s.httpClient.Do(request)
 	if err != nil {
 		return err
 	}
@@ -156,9 +175,9 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	default:
 		return E.New("unexpected status: ", response.Status)
 	}
-	content, err := io.ReadAll(response.Body)
+	content, err := readRuleSetResponse(response.Body, ruleSetMaxResponseBytes)
 	if err != nil {
-		return err
+		return E.Cause(err, "read rule-set ", s.tag)
 	}
 	err = s.loadBytes(content, s)
 	if err != nil {
@@ -191,6 +210,20 @@ func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
 	}
 	s.logger.InfoContext(ctx, "updated rule-set ", s.tag)
 	return nil
+}
+
+func readRuleSetResponse(reader io.Reader, maxBytes int64) ([]byte, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > maxBytes {
+		return nil, E.New("response exceeds ", maxBytes, " bytes")
+	}
+	if len(content) == 0 {
+		return nil, E.New("empty response")
+	}
+	return content, nil
 }
 
 func (s *RemoteRuleSet) resolveTransport() (adapter.HTTPTransport, error) {

@@ -222,12 +222,24 @@ type testOutboundGroup struct {
 	selected adapter.Outbound
 }
 
+func (g *testOutboundGroup) Network() []string {
+	return g.selected.Network()
+}
+
 func (g *testOutboundGroup) Now() string {
 	return g.now
 }
 
 func (g *testOutboundGroup) All() []string {
 	return []string{g.now}
+}
+
+func (g *testOutboundGroup) Hidden() bool {
+	return false
+}
+
+func (g *testOutboundGroup) Icon() string {
+	return ""
 }
 
 func (g *testOutboundGroup) SelectPreMatchOutbound(_ *adapter.InboundContext, selectOutbound func(adapter.Outbound) (adapter.Outbound, adapter.PreMatchAction)) (adapter.Outbound, adapter.PreMatchAction) {

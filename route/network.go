@@ -34,29 +34,33 @@ import (
 var _ adapter.NetworkManager = (*NetworkManager)(nil)
 
 type NetworkManager struct {
-	ctx                    context.Context
-	logger                 logger.ContextLogger
-	router                 adapter.Router
-	interfaceFinder        *control.DefaultInterfaceFinder
-	networkInterfaces      common.TypedValue[[]adapter.NetworkInterface]
-	autoDetectInterface    bool
-	defaultOptions         adapter.NetworkOptions
-	autoRedirectOutputMark uint32
-	networkMonitor         tun.NetworkUpdateMonitor
-	interfaceMonitor       tun.DefaultInterfaceMonitor
-	packageManager         tun.PackageManager
-	powerListener          winpowrprof.EventListener
-	pauseManager           pause.Manager
-	platformInterface      adapter.PlatformInterface
-	connectionManager      adapter.ConnectionManager
-	endpoint               adapter.EndpointManager
-	inbound                adapter.InboundManager
-	outbound               adapter.OutboundManager
-	needWIFIState          bool
-	wifiMonitor            settings.WIFIMonitor
-	wifiState              adapter.WIFIState
-	wifiStateMutex         sync.RWMutex
-	started                bool
+	ctx                     context.Context
+	logger                  logger.ContextLogger
+	router                  adapter.Router
+	interfaceFinder         *control.DefaultInterfaceFinder
+	networkInterfaces       common.TypedValue[[]adapter.NetworkInterface]
+	autoDetectInterface     bool
+	defaultOptions          adapter.NetworkOptions
+	autoRedirectOutputMark  uint32
+	networkMonitor          tun.NetworkUpdateMonitor
+	interfaceMonitor        tun.DefaultInterfaceMonitor
+	packageManager          tun.PackageManager
+	powerListener           winpowrprof.EventListener
+	pauseManager            pause.Manager
+	platformInterface       adapter.PlatformInterface
+	connectionManager       adapter.ConnectionManager
+	endpoint                adapter.EndpointManager
+	inbound                 adapter.InboundManager
+	outbound                adapter.OutboundManager
+	needWIFIState           bool
+	wifiMonitor             settings.WIFIMonitor
+	wifiState               adapter.WIFIState
+	wifiStateMutex          sync.RWMutex
+	resetCoalesceMu         sync.Mutex
+	resetCoalesceTimer      *time.Timer
+	resetCoalesceGeneration uint64
+	resetCoalesceClosed     bool
+	started                 bool
 }
 
 func NewNetworkManager(ctx context.Context, logger logger.ContextLogger, options option.RouteOptions, dnsOptions option.DNSOptions) (*NetworkManager, error) {
@@ -224,6 +228,16 @@ func (r *NetworkManager) Initialize(ruleSets []adapter.RuleSet) {
 }
 
 func (r *NetworkManager) Close() error {
+	r.resetCoalesceMu.Lock()
+	r.resetCoalesceClosed = true
+	r.resetCoalesceGeneration++
+	r.started = false
+	if r.resetCoalesceTimer != nil {
+		r.resetCoalesceTimer.Stop()
+		r.resetCoalesceTimer = nil
+	}
+	r.resetCoalesceMu.Unlock()
+
 	monitor := taskmonitor.New(r.logger, C.StopTimeout)
 	var err error
 	if r.packageManager != nil {
@@ -349,24 +363,24 @@ func (r *NetworkManager) AutoDetectInterfaceFunc() control.Func {
 				return r.platformInterface.AutoDetectInterfaceControl(int(fd))
 			})
 		}
-	} else {
-		if r.interfaceMonitor == nil {
+	}
+	if r.interfaceMonitor == nil {
+		return nil
+	}
+	return func(network, address string, conn syscall.RawConn) error {
+		remoteAddr := M.ParseSocksaddr(address).Addr
+		if remoteAddr.IsValid() {
+			if iif, err := r.interfaceFinder.ByAddr(remoteAddr); err == nil {
+				return control.BindToInterface0(r.interfaceFinder, conn, network, address, iif.Name, iif.Index, false)
+			}
+		}
+		defaultInterface := r.interfaceMonitor.DefaultInterface()
+		if defaultInterface == nil {
+			// During a handoff the userspace monitor can briefly lag behind
+			// the kernel FIB. Let the kernel choose instead of hard-failing.
 			return nil
 		}
-		return control.BindToInterfaceFunc(r.interfaceFinder, func(network string, address string) (interfaceName string, interfaceIndex int, err error) {
-			remoteAddr := M.ParseSocksaddr(address).Addr
-			if remoteAddr.IsValid() {
-				iif, err := r.interfaceFinder.ByAddr(remoteAddr)
-				if err == nil {
-					return iif.Name, iif.Index, nil
-				}
-			}
-			defaultInterface := r.interfaceMonitor.DefaultInterface()
-			if defaultInterface == nil {
-				return "", -1, tun.ErrNoRoute
-			}
-			return defaultInterface.Name, defaultInterface.Index, nil
-		})
+		return control.BindToInterface0(r.interfaceFinder, conn, network, address, defaultInterface.Name, defaultInterface.Index, false)
 	}
 }
 
@@ -525,7 +539,37 @@ func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interfa
 	if !r.started {
 		return
 	}
-	r.ResetNetwork()
+	r.scheduleReset()
+}
+
+const resetCoalesceDelay = 1500 * time.Millisecond
+
+func (r *NetworkManager) scheduleReset() {
+	r.scheduleResetAfter(r.ResetNetwork, resetCoalesceDelay)
+}
+
+func (r *NetworkManager) scheduleResetAfter(reset func(), delay time.Duration) {
+	r.resetCoalesceMu.Lock()
+	if r.resetCoalesceClosed {
+		r.resetCoalesceMu.Unlock()
+		return
+	}
+	r.resetCoalesceGeneration++
+	generation := r.resetCoalesceGeneration
+	if r.resetCoalesceTimer != nil {
+		r.resetCoalesceTimer.Stop()
+	}
+	r.resetCoalesceTimer = time.AfterFunc(delay, func() {
+		r.resetCoalesceMu.Lock()
+		if r.resetCoalesceClosed || generation != r.resetCoalesceGeneration {
+			r.resetCoalesceMu.Unlock()
+			return
+		}
+		r.resetCoalesceTimer = nil
+		r.resetCoalesceMu.Unlock()
+		reset()
+	})
+	r.resetCoalesceMu.Unlock()
 }
 
 func (r *NetworkManager) notifyWindowsPowerEvent(event int) {

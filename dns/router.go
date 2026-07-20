@@ -147,7 +147,10 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 }
 
 func (r *Router) Initialize(rules []option.DNSRule) error {
-	r.rawRules = append(r.rawRules[:0], rules...)
+	if oldRawRules := r.rawRules; cap(oldRawRules) > 0 {
+		clear(oldRawRules[:cap(oldRawRules)])
+	}
+	r.rawRules = append([]option.DNSRule(nil), rules...)
 	newRules, _, _, err := r.buildRules(false)
 	if err != nil {
 		return err

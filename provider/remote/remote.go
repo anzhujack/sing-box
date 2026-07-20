@@ -33,6 +33,8 @@ import (
 	"github.com/sagernet/sing/service/filemanager"
 )
 
+const providerInitialRetryInterval = 60 * time.Second
+
 func RegisterProvider(registry *provider.Registry) {
 	provider.Register[option.ProviderRemoteOptions](registry, C.ProviderTypeRemote, NewProviderRemote)
 }
@@ -145,10 +147,10 @@ func (s *ProviderRemote) StartContext(ctx context.Context, startContext *adapter
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
 	if s.lastUpdated.IsZero() {
-		ctx = interrupt.ContextWithIsProviderConnection(ctx)
-		err := s.fetch(ctx, true)
+		fetchCtx := interrupt.ContextWithIsProviderConnection(ctx)
+		err := s.fetch(fetchCtx, true)
 		if err != nil {
-			return E.Cause(err, "initial outbound provider: ", s.Tag())
+			s.logger.Warn("initial outbound provider ", s.Tag(), " fetch failed: ", err, " — starting empty and retrying in ", providerInitialRetryInterval)
 		}
 	}
 	s.ticker = time.NewTicker(s.updateInterval)
@@ -157,11 +159,12 @@ func (s *ProviderRemote) StartContext(ctx context.Context, startContext *adapter
 }
 
 func (s *ProviderRemote) Update() error {
-	if s.ticker != nil {
-		s.ticker.Reset(s.updateInterval)
-	}
 	ctx := interrupt.ContextWithIsProviderConnection(s.ctx)
-	return s.fetch(ctx, false)
+	err := s.fetch(ctx, false)
+	if s.ticker != nil {
+		s.ticker.Reset(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
+	}
+	return err
 }
 
 func (s *ProviderRemote) UpdatedAt() time.Time {
@@ -431,16 +434,7 @@ func (s *ProviderRemote) loopUpdate() {
 	case <-s.ticker.C:
 	default:
 	}
-	if remaining := time.Until(func() time.Time {
-		s.infoMu.RLock()
-		defer s.infoMu.RUnlock()
-		return s.lastUpdated
-	}().Add(s.updateInterval)); remaining > 0 {
-		s.ticker.Reset(remaining)
-	} else {
-		s.updateOnce()
-		s.ticker.Reset(s.updateInterval)
-	}
+	s.ticker.Reset(initialProviderUpdateDelay(s.UpdatedAt(), s.updateInterval, time.Now()))
 	for {
 		runtime.GC()
 		select {
@@ -448,9 +442,27 @@ func (s *ProviderRemote) loopUpdate() {
 			return
 		case <-s.ticker.C:
 			s.updateOnce()
-			s.ticker.Reset(s.updateInterval)
+			s.ticker.Reset(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
 		}
 	}
+}
+
+func initialProviderUpdateDelay(lastUpdated time.Time, updateInterval time.Duration, now time.Time) time.Duration {
+	if lastUpdated.IsZero() {
+		return providerInitialRetryInterval
+	}
+	wait := lastUpdated.Add(updateInterval).Sub(now)
+	if wait < 0 {
+		return 0
+	}
+	return wait
+}
+
+func providerRetryDelay(lastUpdated time.Time, updateInterval time.Duration) time.Duration {
+	if lastUpdated.IsZero() {
+		return providerInitialRetryInterval
+	}
+	return updateInterval
 }
 
 func (s *ProviderRemote) saveCacheFile(hasInfo bool, info adapter.SubscriptionInfo, contentRaw []byte) error {

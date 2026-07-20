@@ -43,11 +43,12 @@ func (u *RuleSetUpdater) Close() error {
 }
 
 func (u *RuleSetUpdater) loopUpdate() {
+	now := time.Now()
 	nextUpdates := make([]time.Time, len(u.ruleSets))
 	for i, ruleSet := range u.ruleSets {
-		nextUpdates[i] = ruleSet.UpdatedTime().Add(ruleSet.updateInterval)
+		nextUpdates[i] = now.Add(initialRuleSetUpdateDelay(ruleSet.lastUpdated, ruleSet.updateInterval, now))
 	}
-	timer := time.NewTimer(0)
+	timer := time.NewTimer(waitUntilNext(nextUpdates))
 	defer timer.Stop()
 	for {
 		select {
@@ -55,14 +56,18 @@ func (u *RuleSetUpdater) loopUpdate() {
 			return
 		case <-timer.C:
 		}
-		now := time.Now()
+		now = time.Now()
 		var updated bool
 		for i, ruleSet := range u.ruleSets {
 			if now.Before(nextUpdates[i]) {
 				continue
 			}
-			ruleSet.update()
-			nextUpdates[i] = now.Add(ruleSet.updateInterval)
+			succeeded := ruleSet.update()
+			nextDelay := ruleSet.updateInterval
+			if !succeeded && ruleSet.lastUpdated.IsZero() {
+				nextDelay = ruleSetInitialRetryInterval
+			}
+			nextUpdates[i] = now.Add(nextDelay)
 			updated = true
 		}
 		if updated {
@@ -70,6 +75,17 @@ func (u *RuleSetUpdater) loopUpdate() {
 		}
 		timer.Reset(waitUntilNext(nextUpdates))
 	}
+}
+
+func initialRuleSetUpdateDelay(lastUpdated time.Time, updateInterval time.Duration, now time.Time) time.Duration {
+	if lastUpdated.IsZero() {
+		return ruleSetInitialRetryInterval
+	}
+	wait := lastUpdated.Add(updateInterval).Sub(now)
+	if wait < 0 {
+		return 0
+	}
+	return wait
 }
 
 func waitUntilNext(nextUpdates []time.Time) time.Duration {
