@@ -21,12 +21,10 @@ func TestSelectorSelectPreMatchOutbound(t *testing.T) {
 func TestURLTestSelectPreMatchOutboundByNetwork(t *testing.T) {
 	tcpOutbound := new(preMatchTestOutbound)
 	udpOutbound := new(preMatchTestOutbound)
-	urlTest := &URLTest{
-		group: &URLTestGroup{
-			selectedOutboundTCP: tcpOutbound,
-			selectedOutboundUDP: udpOutbound,
-		},
-	}
+	urlTestGroup := &URLTestGroup{}
+	urlTestGroup.selectedOutboundTCP.Store(tcpOutbound)
+	urlTestGroup.selectedOutboundUDP.Store(udpOutbound)
+	urlTest := &URLTest{group: urlTestGroup}
 
 	selectedTCP, tcpAction := urlTest.SelectPreMatchOutbound(&adapter.InboundContext{Network: N.NetworkTCP}, selectPreMatchFlow)
 	selectedUDP, udpAction := urlTest.SelectPreMatchOutbound(&adapter.InboundContext{Network: N.NetworkUDP}, selectPreMatchFlow)

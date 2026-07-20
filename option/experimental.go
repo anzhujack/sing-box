@@ -6,8 +6,47 @@ type ExperimentalOptions struct {
 	CacheFile           *CacheFileOptions `json:"cache_file,omitempty"`
 	ClashAPI            *ClashAPIOptions  `json:"clash_api,omitempty"`
 	V2RayAPI            *V2RayAPIOptions  `json:"v2ray_api,omitempty"`
+	Smart               *SmartOptions     `json:"smart,omitempty"`
+	GeoX                *GeoXOptions      `json:"geox,omitempty"`
 	Debug               *DebugOptions     `json:"debug,omitempty"`
 	URLTestUnifiedDelay bool              `json:"urltest_unified_delay,omitempty"`
+}
+
+type SmartOptions struct {
+	LightGBM  *SmartLightGBMOptions  `json:"lightgbm,omitempty"`
+	Collector *SmartCollectorOptions `json:"collector,omitempty"`
+}
+
+type SmartLightGBMOptions struct {
+	URL            string             `json:"url,omitempty"`
+	AutoUpdate     bool               `json:"auto_update,omitempty"`
+	UpdateInterval badoption.Duration `json:"update_interval,omitempty"`
+	ModelPath      string             `json:"model_path,omitempty"`
+	HTTPClient     *HTTPClientOptions `json:"http_client,omitempty"`
+	// Deprecated: use http_client instead
+	DownloadDetour string `json:"download_detour,omitempty"`
+}
+
+type SmartCollectorOptions struct {
+	SizeLimitMB int64  `json:"size_limit_mb,omitempty"`
+	Path        string `json:"path,omitempty"`
+}
+
+type GeoXOptions struct {
+	Enabled        bool               `json:"enabled,omitempty"`
+	AutoUpdate     bool               `json:"auto_update,omitempty"`
+	UpdateInterval badoption.Duration `json:"update_interval,omitempty"`
+	HTTPClient     *HTTPClientOptions `json:"http_client,omitempty"`
+	// Deprecated: use http_client instead
+	DownloadDetour string   `json:"download_detour,omitempty"`
+	URL            GeoXURLs `json:"url,omitempty"`
+}
+
+type GeoXURLs struct {
+	GeoIP   string                     `json:"geoip,omitempty"`
+	GeoSite string                     `json:"geosite,omitempty"`
+	MMDB    string                     `json:"mmdb,omitempty"`
+	ASN     badoption.Listable[string] `json:"asn,omitempty"`
 }
 
 type CacheFileOptions struct {

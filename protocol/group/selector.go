@@ -48,6 +48,8 @@ type Selector struct {
 	exclude         *regexp.Regexp
 	include         *regexp.Regexp
 	useAllProviders bool
+	hidden          bool
+	icon            string
 }
 
 func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.SelectorOutboundOptions) (adapter.Outbound, error) {
@@ -72,6 +74,8 @@ func NewSelector(ctx context.Context, router adapter.Router, logger log.ContextL
 		exclude:         (*regexp.Regexp)(options.Exclude),
 		include:         (*regexp.Regexp)(options.Include),
 		useAllProviders: options.UseAllProviders,
+		hidden:          options.Hidden,
+		icon:            options.Icon,
 	}
 	return outbound, nil
 }
@@ -134,6 +138,9 @@ func (s *Selector) Now() string {
 	}
 	return selected.Tag()
 }
+
+func (s *Selector) Hidden() bool { return s.hidden }
+func (s *Selector) Icon() string { return s.icon }
 
 func (s *Selector) All() []string {
 	return s.tags

@@ -38,14 +38,8 @@ func TestLoadBalanceSelectPreMatchOutboundWithMetadata(t *testing.T) {
 func TestLoadBalancePreMatchDoesNotConsumeIneligibleRoundRobinSelection(t *testing.T) {
 	firstOutbound := &preMatchTestOutbound{tag: "first"}
 	secondOutbound := &preMatchTestOutbound{tag: "second"}
-	history := U.NewHistoryStorage()
-	history.StoreURLTestHistory(firstOutbound.Tag(), new(adapter.URLTestHistory))
-	history.StoreURLTestHistory(secondOutbound.Tag(), new(adapter.URLTestHistory))
-	loadBalanceGroup := &LoadBalanceGroup{
-		outbounds: []adapter.Outbound{firstOutbound, secondOutbound},
-		history:   history,
-	}
-	loadBalanceGroup.strategyFn = strategyRoundRobin(loadBalanceGroup, "")
+	loadBalanceGroup := newPreMatchLoadBalanceGroup([]adapter.Outbound{firstOutbound, secondOutbound})
+	loadBalanceGroup.strategyFn = strategyRoundRobin(loadBalanceGroup)
 	loadBalance := &LoadBalance{group: loadBalanceGroup}
 	metadata := new(adapter.InboundContext)
 
@@ -60,14 +54,8 @@ func TestLoadBalancePreMatchDoesNotConsumeIneligibleRoundRobinSelection(t *testi
 func TestLoadBalancePreMatchAdvancesAcceptedRoundRobinSelection(t *testing.T) {
 	firstOutbound := &preMatchTestOutbound{tag: "first"}
 	secondOutbound := &preMatchTestOutbound{tag: "second"}
-	history := U.NewHistoryStorage()
-	history.StoreURLTestHistory(firstOutbound.Tag(), new(adapter.URLTestHistory))
-	history.StoreURLTestHistory(secondOutbound.Tag(), new(adapter.URLTestHistory))
-	loadBalanceGroup := &LoadBalanceGroup{
-		outbounds: []adapter.Outbound{firstOutbound, secondOutbound},
-		history:   history,
-	}
-	loadBalanceGroup.strategyFn = strategyRoundRobin(loadBalanceGroup, "")
+	loadBalanceGroup := newPreMatchLoadBalanceGroup([]adapter.Outbound{firstOutbound, secondOutbound})
+	loadBalanceGroup.strategyFn = strategyRoundRobin(loadBalanceGroup)
 	loadBalance := &LoadBalance{group: loadBalanceGroup}
 	metadata := new(adapter.InboundContext)
 
@@ -82,16 +70,9 @@ func TestLoadBalancePreMatchAdvancesAcceptedRoundRobinSelection(t *testing.T) {
 func TestLoadBalanceStickyPreMatchReusesIneligibleSelectionForL4(t *testing.T) {
 	nonL3Outbound := &preMatchTestOutbound{tag: "non-l3"}
 	l3Outbound := &preMatchTestOutbound{tag: "l3"}
-	history := U.NewHistoryStorage()
-	history.StoreURLTestHistory(nonL3Outbound.Tag(), new(adapter.URLTestHistory))
-	history.StoreURLTestHistory(l3Outbound.Tag(), new(adapter.URLTestHistory))
-	loadBalanceGroup := &LoadBalanceGroup{
-		outbounds: []adapter.Outbound{nonL3Outbound, l3Outbound},
-		history:   history,
-		ttl:       time.Minute,
-	}
+	loadBalanceGroup := newPreMatchLoadBalanceGroup([]adapter.Outbound{nonL3Outbound, l3Outbound})
 	var selectIndexCount int
-	loadBalanceGroup.strategyFn = strategyStickySessionsWithIndex(loadBalanceGroup, func(_ uint64, length int) int {
+	loadBalanceGroup.strategyFn = strategyStickySessionsWithIndex(loadBalanceGroup, 4096, func(_ uint64, length int) int {
 		index := selectIndexCount % length
 		selectIndexCount++
 		return index
@@ -112,4 +93,28 @@ func TestLoadBalanceStickyPreMatchReusesIneligibleSelectionForL4(t *testing.T) {
 	require.Same(t, nonL3Outbound, preMatchCandidate)
 	require.Same(t, nonL3Outbound, loadBalanceGroup.Unwrap(metadata, true))
 	require.Equal(t, 1, selectIndexCount)
+}
+
+func newPreMatchLoadBalanceGroup(outbounds []adapter.Outbound) *LoadBalanceGroup {
+	history := U.NewHistoryStorage()
+	tags := make([]string, 0, len(outbounds))
+	outboundByTag := make(map[string]adapter.Outbound, len(outbounds))
+	for _, outbound := range outbounds {
+		tag := outbound.Tag()
+		tags = append(tags, tag)
+		outboundByTag[tag] = outbound
+		history.StoreURLTestHistory(tag, &adapter.URLTestHistory{Time: time.Now()})
+	}
+	group := &LoadBalanceGroup{
+		history:  history,
+		interval: time.Minute,
+		ttl:      time.Minute,
+	}
+	group.state.Store(&lbState{
+		outbounds:     outbounds,
+		tags:          tags,
+		alive:         outbounds,
+		outboundByTag: outboundByTag,
+	})
+	return group
 }

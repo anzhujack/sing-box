@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/sagernet/bbolt"
 	"github.com/sagernet/sing-box/common/hash"
 	"github.com/sagernet/sing/common/observable"
 	"github.com/sagernet/sing/common/varbin"
@@ -18,6 +19,7 @@ type ClashServer interface {
 	ModeList() []string
 	SetMode(mode string)
 	AddModeUpdateHook(hook *observable.Subscriber[struct{}])
+	HistoryStorage() URLTestHistoryStorage
 }
 
 type URLTestHistory struct {
@@ -25,9 +27,31 @@ type URLTestHistory struct {
 	Delay uint16    `json:"delay"`
 }
 
+type URLTestHistoryStorage interface {
+	LoadURLTestHistory(tag string) *URLTestHistory
+	DeleteURLTestHistory(tag string)
+	StoreURLTestHistory(tag string, history *URLTestHistory)
+}
+
 type V2RayServer interface {
 	LifecycleService
 	StatsService() ConnectionTracker
+}
+
+type SmartService interface {
+	LifecycleService
+	LightGBMEnabled() bool
+	CollectorEnabled() bool
+}
+
+type GeoXService interface {
+	LifecycleService
+	Enabled() bool
+	GeoIPPath() string
+	GeoSitePath() string
+	MMDBPath() string
+	ASNPath() string
+	ASNPaths() []string
 }
 
 type CacheFile interface {
@@ -59,6 +83,7 @@ type CacheFile interface {
 	SaveExternalUI(tag string, info *SavedBinary) error
 	LoadSubscription(tag string) *SavedBinary
 	SaveSubscription(tag string, sub *SavedBinary) error
+	SmartDB() *bbolt.DB
 }
 
 type SavedBinary struct {
@@ -161,6 +186,8 @@ type OutboundGroup interface {
 	Outbound
 	Now() string
 	All() []string
+	Hidden() bool
+	Icon() string
 }
 
 type PreMatchOutboundGroup interface {
