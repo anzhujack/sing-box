@@ -11,9 +11,11 @@ import (
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing/common"
 	F "github.com/sagernet/sing/common/format"
 	"github.com/sagernet/sing/common/json"
+	"github.com/sagernet/sing/service"
 	"github.com/sagernet/ws"
 	"github.com/sagernet/ws/wsutil"
 
@@ -27,6 +29,7 @@ func connectionRouter(ctx context.Context, network adapter.NetworkManager, traff
 	r.Get("/", getConnections(ctx, trafficManager))
 	r.Delete("/", closeAllConnections(network, trafficManager))
 	r.Delete("/{id}", closeConnection(trafficManager))
+	r.Delete("/smart/{id}", smartBlockConnection(ctx, trafficManager))
 	return r
 }
 
@@ -55,10 +58,12 @@ func (c connectionObject) MarshalJSON() ([]byte, error) {
 		inbound = c.Metadata.InboundType
 	}
 	var domain string
-	if c.Metadata.Destination.Fqdn != "" {
+	if c.Metadata.Domain != "" {
+		domain = c.Metadata.Domain
+	} else if c.Metadata.Destination.Fqdn != "" {
 		domain = c.Metadata.Destination.Fqdn
 	} else {
-		domain = c.Metadata.Domain
+		domain = c.Metadata.SniffHost
 	}
 	var destinationAddr netip.Addr
 	if len(c.Metadata.DestinationAddresses) > 0 {
@@ -184,5 +189,76 @@ func closeAllConnections(network adapter.NetworkManager, trafficManager *traffic
 		trafficManager.CloseAllConnections()
 		network.ResetNetwork()
 		render.NoContent(w, r)
+	}
+}
+
+func smartBlockConnection(ctx context.Context, trafficManager *trafficcontrol.Manager) func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := uuid.FromStringOrNil(chi.URLParam(r, "id"))
+		if id == uuid.Nil {
+			render.Status(r, http.StatusBadRequest)
+			render.JSON(w, r, ErrBadRequest)
+			return
+		}
+		targetConnection := trafficManager.Connection(id)
+		if targetConnection == nil {
+			render.Status(r, http.StatusNotFound)
+			render.JSON(w, r, ErrNotFound)
+			return
+		}
+		metadata := targetConnection.Metadata()
+		targetConnection.Close()
+
+		outboundManager := service.FromContext[adapter.OutboundManager](ctx)
+		if outboundManager == nil {
+			render.NoContent(w, r)
+			return
+		}
+
+		chains := []struct {
+			chain      []string
+			nodeOffset int
+		}{
+			{chain: metadata.Metadata.GetRealOutboundChain(), nodeOffset: 1},
+			{chain: metadata.Chains(), nodeOffset: -1},
+			{chain: metadata.Chains(), nodeOffset: 1},
+		}
+		var blocked struct {
+			Group string `json:"group,omitempty"`
+			Node  string `json:"node,omitempty"`
+		}
+		for _, candidate := range chains {
+			for index, tag := range candidate.chain {
+				outbound, ok := outboundManager.Outbound(tag)
+				if !ok {
+					continue
+				}
+				smartGroup, ok := outbound.(*group.Smart)
+				if !ok {
+					continue
+				}
+				nodeTag := ""
+				nodeIndex := index + candidate.nodeOffset
+				if nodeIndex >= 0 && nodeIndex < len(candidate.chain) {
+					nodeTag = candidate.chain[nodeIndex]
+				}
+				if nodeTag == "" || nodeTag == tag {
+					nodeTag = smartGroup.Now()
+				}
+				if nodeTag == "" {
+					break
+				}
+				if err := smartGroup.MarkBlocked(nodeTag, group.DefaultBlockDuration); err == nil {
+					blocked.Group = tag
+					blocked.Node = nodeTag
+				}
+				break
+			}
+			if blocked.Group != "" {
+				break
+			}
+		}
+
+		render.JSON(w, r, blocked)
 	}
 }

@@ -60,6 +60,33 @@ type DNSClientOptions struct {
 	MaxCacheTTL      uint32                `json:"max_cache_ttl,omitempty"`
 	Optimistic       *OptimisticDNSOptions `json:"optimistic,omitempty"`
 	ClientSubnet     *badoption.Prefixable `json:"client_subnet,omitempty"`
+	Prefetch         *PrefetchDNSOptions   `json:"prefetch,omitempty"`
+}
+
+type _PrefetchDNSOptions struct {
+	Enabled           bool               `json:"enabled,omitempty"`
+	MetadataSize      uint32             `json:"metadata_size,omitempty"`
+	QPS               uint32             `json:"qps,omitempty"`
+	BackoffMultiplier float64            `json:"backoff_multiplier,omitempty"`
+	MaxBackoff        badoption.Duration `json:"max_backoff,omitempty"`
+	JitterFraction    float64            `json:"jitter_fraction,omitempty"`
+}
+
+type PrefetchDNSOptions _PrefetchDNSOptions
+
+func (o PrefetchDNSOptions) MarshalJSON() ([]byte, error) {
+	if o.MetadataSize == 0 && o.QPS == 0 && o.BackoffMultiplier == 0 && o.MaxBackoff == 0 && o.JitterFraction == 0 {
+		return json.Marshal(o.Enabled)
+	}
+	return json.Marshal((_PrefetchDNSOptions)(o))
+}
+
+func (o *PrefetchDNSOptions) UnmarshalJSON(bytes []byte) error {
+	err := json.Unmarshal(bytes, &o.Enabled)
+	if err == nil {
+		return nil
+	}
+	return json.UnmarshalDisallowUnknownFields(bytes, (*_PrefetchDNSOptions)(o))
 }
 
 type _OptimisticDNSOptions struct {

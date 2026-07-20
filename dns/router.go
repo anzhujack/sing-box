@@ -82,6 +82,28 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 			optimisticTimeout = 3 * 24 * time.Hour
 		}
 	}
+	var prefetchManager *PrefetchManager
+	prefetchOptions := common.PtrValueOrDefault(options.DNSClientOptions.Prefetch)
+	if prefetchOptions.Enabled && !options.DNSClientOptions.DisableCache {
+		metadataSize := prefetchOptions.MetadataSize
+		if metadataSize == 0 {
+			metadataSize = 1024
+		}
+		qps := prefetchOptions.QPS
+		if qps == 0 {
+			qps = 10
+		}
+		prefetchManager = NewPrefetchManager(int(metadataSize), int(qps))
+		if prefetchOptions.BackoffMultiplier > 0 {
+			prefetchManager.backoffMultiplier = prefetchOptions.BackoffMultiplier
+		}
+		if prefetchOptions.MaxBackoff > 0 {
+			prefetchManager.maxBackoff = time.Duration(prefetchOptions.MaxBackoff)
+		}
+		if prefetchOptions.JitterFraction > 0 {
+			prefetchManager.jitterFraction = prefetchOptions.JitterFraction
+		}
+	}
 	router.client = NewClient(ClientOptions{
 		Context:           ctx,
 		Timeout:           time.Duration(options.DNSClientOptions.Timeout),
@@ -93,6 +115,7 @@ func NewRouter(ctx context.Context, logFactory log.Factory, options option.DNSOp
 		MinCacheTTL:       options.DNSClientOptions.MinCacheTTL,
 		MaxCacheTTL:       options.DNSClientOptions.MaxCacheTTL,
 		ClientSubnet:      options.DNSClientOptions.ClientSubnet.Build(netip.Prefix{}),
+		PrefetchMgr:       prefetchManager,
 		RDRC: func() adapter.RDRCStore {
 			cacheFile := service.FromContext[adapter.CacheFile](ctx)
 			if cacheFile == nil {

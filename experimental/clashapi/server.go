@@ -18,6 +18,7 @@ import (
 	"github.com/sagernet/sing-box/common/trafficcontrol"
 	"github.com/sagernet/sing-box/common/urltest"
 	C "github.com/sagernet/sing-box/constant"
+	boxdns "github.com/sagernet/sing-box/dns"
 	"github.com/sagernet/sing-box/experimental"
 	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/log"
@@ -42,18 +43,19 @@ func init() {
 var _ adapter.ClashServer = (*Server)(nil)
 
 type Server struct {
-	ctx            context.Context
-	network        adapter.NetworkManager
-	router         adapter.Router
-	dnsRouter      adapter.DNSRouter
-	outbound       adapter.OutboundManager
-	provider       adapter.ProviderManager
-	endpoint       adapter.EndpointManager
-	logger         log.Logger
-	httpServer     *http.Server
-	trafficManager *trafficcontrol.Manager
-	urlTestHistory *urltest.HistoryStorage
-	logDebug       bool
+	ctx             context.Context
+	network         adapter.NetworkManager
+	router          adapter.Router
+	dnsRouter       adapter.DNSRouter
+	outbound        adapter.OutboundManager
+	provider        adapter.ProviderManager
+	endpoint        adapter.EndpointManager
+	logger          log.Logger
+	httpServer      *http.Server
+	trafficManager  *trafficcontrol.Manager
+	urlTestHistory  *urltest.HistoryStorage
+	logDebug        bool
+	dnsStatsManager *DNSStatsManager
 
 	mode             string
 	modeList         []string
@@ -86,6 +88,8 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 	if updateInterval > 0 && updateInterval < time.Hour {
 		updateInterval = time.Hour
 	}
+	dnsStatsManager := NewDNSStatsManager()
+	boxdns.SetQueryRecorder(dnsStatsManager)
 	s := &Server{
 		ctx:       ctx,
 		network:   service.FromContext[adapter.NetworkManager](ctx),
@@ -102,6 +106,7 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		trafficManager:           trafficManager,
 		urlTestHistory:           urlTestHistory,
 		logDebug:                 logFactory.Level() >= log.LevelDebug,
+		dnsStatsManager:          dnsStatsManager,
 		modeList:                 options.ModeList,
 		externalController:       options.ExternalController != "",
 		externalUIDownloadURL:    options.ExternalUIDownloadURL,
@@ -152,7 +157,8 @@ func NewServer(ctx context.Context, logFactory log.ObservableFactory, options op
 		r.Mount("/script", scriptRouter())
 		r.Mount("/profile", profileRouter())
 		r.Mount("/cache", cacheRouter(ctx))
-		r.Mount("/dns", dnsRouter(s.dnsRouter))
+		r.Mount("/dns", dnsRouter(s.dnsRouter, dnsStatsManager))
+		r.Mount("/smart", smartRouter(ctx))
 
 		if service.FromContext[adapter.PlatformInterface](ctx) == nil {
 			r.Mount("/restart", restartRouter(ctx, logFactory))
@@ -254,6 +260,9 @@ func (s *Server) Close() error {
 	if s.ticker != nil {
 		s.ticker.Stop()
 	}
+	if s.dnsStatsManager != nil {
+		boxdns.SetQueryRecorder(nil)
+	}
 	return common.Close(
 		common.PtrOrNil(s.httpServer),
 	)
@@ -271,6 +280,10 @@ func (s *Server) AddModeUpdateHook(hook *observable.Subscriber[struct{}]) {
 	s.modeUpdateAccess.Lock()
 	defer s.modeUpdateAccess.Unlock()
 	s.modeUpdateHooks = append(s.modeUpdateHooks, hook)
+}
+
+func (s *Server) HistoryStorage() adapter.URLTestHistoryStorage {
+	return s.urlTestHistory
 }
 
 func (s *Server) SetMode(newMode string) {

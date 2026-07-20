@@ -104,6 +104,7 @@ type Client struct {
 	minCacheTTL       uint32
 	maxCacheTTL       uint32
 	clientSubnet      netip.Prefix
+	prefetchMgr       *PrefetchManager
 	rdrc              adapter.RDRCStore
 	initRDRCFunc      func() adapter.RDRCStore
 	dnsCache          adapter.DNSCacheStore
@@ -126,6 +127,7 @@ type ClientOptions struct {
 	MinCacheTTL       uint32
 	MaxCacheTTL       uint32
 	ClientSubnet      netip.Prefix
+	PrefetchMgr       *PrefetchManager
 	RDRC              func() adapter.RDRCStore
 	DNSCache          func() adapter.DNSCacheStore
 	Logger            logger.ContextLogger
@@ -144,6 +146,7 @@ func NewClient(options ClientOptions) *Client {
 		minCacheTTL:       options.MinCacheTTL,
 		maxCacheTTL:       options.MaxCacheTTL,
 		clientSubnet:      options.ClientSubnet,
+		prefetchMgr:       options.PrefetchMgr,
 		initRDRCFunc:      options.RDRC,
 		initDNSCacheFunc:  options.DNSCache,
 		logger:            options.Logger,
@@ -399,7 +402,15 @@ func (c *Client) finishExchange(transport adapter.DNSTransport, operation *excha
 	return response, nil
 }
 
-func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
+func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (response *dns.Msg, err error) {
+	startedAt := time.Now()
+	defer func() {
+		c.recordExternalExchange(message, transport, startedAt, response)
+	}()
+	return c.exchange(ctx, transport, message, options, responseChecker)
+}
+
+func (c *Client) exchange(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) (*dns.Msg, error) {
 	operation, earlyResponse, status, err := c.beginExchange(ctx, transport, message, options, responseChecker, true)
 	if status != exchangeReady {
 		return earlyResponse, err
@@ -413,28 +424,49 @@ func (c *Client) Exchange(ctx context.Context, transport adapter.DNSTransport, m
 }
 
 func (c *Client) ExchangeAsync(ctx context.Context, transport adapter.DNSTransport, message *dns.Msg, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool, callback func(response *dns.Msg, err error)) {
+	startedAt := time.Now()
+	recordingCallback := func(response *dns.Msg, err error) {
+		c.recordExternalExchange(message, transport, startedAt, response)
+		callback(response, err)
+	}
 	operation, earlyResponse, status, err := c.beginExchange(ctx, transport, message, options, responseChecker, false)
 	switch status {
 	case exchangeDone:
-		callback(earlyResponse, err)
+		recordingCallback(earlyResponse, err)
 		return
 	case exchangeWait:
 		go func() {
-			callback(c.Exchange(ctx, transport, message, options, responseChecker))
+			recordingCallback(c.exchange(ctx, transport, message, options, responseChecker))
 		}()
 		return
 	}
 	finish := func(response *dns.Msg, exchangeErr error) {
 		if exchangeErr != nil {
 			operation.release()
-			callback(nil, exchangeErr)
+			recordingCallback(nil, exchangeErr)
 			return
 		}
 		finishedResponse, finishErr := c.finishExchange(transport, operation, response)
 		operation.release()
-		callback(finishedResponse, finishErr)
+		recordingCallback(finishedResponse, finishErr)
 	}
 	c.exchangeToTransportAsync(operation.ctx, transport, operation.message, options.Timeout, finish)
+}
+
+func (c *Client) recordExternalExchange(message *dns.Msg, transport adapter.DNSTransport, startedAt time.Time, response *dns.Msg) {
+	if message == nil || len(message.Question) == 0 {
+		return
+	}
+	question := message.Question[0]
+	rcode := dns.RcodeServerFailure
+	if response != nil {
+		rcode = response.Rcode
+	}
+	transportTag := ""
+	if transport != nil {
+		transportTag = transport.Tag()
+	}
+	recordExternalQuery(FqdnToDomain(question.Name), question.Qtype, rcode, transportTag, time.Since(startedAt).Milliseconds(), "")
 }
 
 func (c *Client) Lookup(ctx context.Context, transport adapter.DNSTransport, domain string, options adapter.DNSQueryOptions, responseChecker func(response *dns.Msg) bool) ([]netip.Addr, error) {

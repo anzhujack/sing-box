@@ -13,13 +13,14 @@ import (
 	"github.com/miekg/dns"
 )
 
-func dnsRouter(router adapter.DNSRouter) http.Handler {
+func dnsRouter(router adapter.DNSRouter, statsManager *DNSStatsManager) http.Handler {
 	r := chi.NewRouter()
-	r.Get("/query", queryDNS(router))
+	r.Get("/query", queryDNS(router, statsManager))
+	r.Mount("/stats", dnsStatsRouter(statsManager))
 	return r
 }
 
-func queryDNS(router adapter.DNSRouter) func(w http.ResponseWriter, r *http.Request) {
+func queryDNS(router adapter.DNSRouter, statsManager *DNSStatsManager) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Query().Get("name")
 		qTypeStr := r.URL.Query().Get("type")
