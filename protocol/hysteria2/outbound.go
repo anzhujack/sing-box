@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -41,8 +42,9 @@ var (
 
 type Outbound struct {
 	outbound.Adapter
-	logger logger.ContextLogger
-	client *hysteria2.Client
+	logger            logger.ContextLogger
+	client            *hysteria2.Client
+	interfaceUpdateAt atomic.Int64
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.Hysteria2OutboundOptions) (adapter.Outbound, error) {
@@ -203,6 +205,14 @@ func (h *Outbound) ListenPacket(ctx context.Context, destination M.Socksaddr) (n
 }
 
 func (h *Outbound) InterfaceUpdated() {
+	now := time.Now().UnixNano()
+	last := h.interfaceUpdateAt.Load()
+	if last != 0 && now-last < int64(time.Second) {
+		return
+	}
+	if !h.interfaceUpdateAt.CompareAndSwap(last, now) {
+		return
+	}
 	h.client.CloseWithError(E.New("network changed"))
 }
 

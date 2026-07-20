@@ -33,7 +33,7 @@ func NewIPCIDRItem(isSource bool, prefixStrings []string) (*IPCIDRItem, error) {
 			builder.Add(addr)
 			continue
 		}
-		return nil, E.Cause(err, "parse [", i, "]")
+		return nil, E.Cause(addrErr, "parse ipcidr[", i, "]=\"", prefixString, "\": not a valid IP or CIDR (expected forms: 1.2.3.4, 1.2.3.0/24, ::1, 2001:db8::/32)")
 	}
 	var description string
 	if isSource {

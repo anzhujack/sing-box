@@ -33,7 +33,11 @@ import (
 	"github.com/sagernet/sing/service/filemanager"
 )
 
-const providerInitialRetryInterval = 60 * time.Second
+const (
+	providerInitialRetryInterval = 60 * time.Second
+	providerFetchTimeout         = 60 * time.Second
+	providerMaxResponseBytes     = 50 * 1024 * 1024
+)
 
 func RegisterProvider(registry *provider.Registry) {
 	provider.Register[option.ProviderRemoteOptions](registry, C.ProviderTypeRemote, NewProviderRemote)
@@ -224,7 +228,9 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	}
 	defer s.updating.Store(false)
 	s.logger.Debug("updating outbound provider ", s.Tag(), " from URL: ", s.url)
-	req, err := http.NewRequest(http.MethodGet, s.url, nil)
+	fetchCtx, cancel := context.WithTimeout(ctx, providerFetchTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(fetchCtx, http.MethodGet, s.url, nil)
 	if err != nil {
 		return err
 	}
@@ -235,19 +241,17 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	if !isStart {
 		defer s.httpClient.CloseIdleConnections()
 	}
-	resp, err := s.httpClient.Do(req.WithContext(ctx))
+	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
 	infoStr := resp.Header.Get("subscription-userinfo")
 	info, hasInfo := parseInfo(infoStr)
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
-		s.infoMu.Lock()
-		s.subscriptionInfo = info
-		s.lastUpdated = time.Now()
-		s.infoMu.Unlock()
+		now := time.Now()
 		if s.cacheFile != nil {
 			saveSub := s.cacheFile.LoadSubscription(s.Tag())
 			if saveSub != nil {
@@ -259,7 +263,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 						saveSub.Content = append([]byte(infoStr+"\n"), saveSub.Content[index+1:]...)
 					}
 				}
-				saveSub.LastUpdated = s.lastUpdated
+				saveSub.LastUpdated = now
 				if err := s.cacheFile.SaveSubscription(s.Tag(), saveSub); err != nil {
 					s.logger.Error("save outbound provider cache file: ", err)
 				}
@@ -274,21 +278,23 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 				return E.Cause(err, "save outbound provider cache file")
 			}
 		}
+		s.infoMu.Lock()
+		s.subscriptionInfo = info
+		s.lastUpdated = now
+		s.infoMu.Unlock()
 		s.logger.Info("update outbound provider ", s.Tag(), ": not modified")
 		return nil
 	default:
 		return E.New("unexpected status: ", resp.Status)
 	}
-	defer resp.Body.Close()
-	contentRaw, err := io.ReadAll(resp.Body)
+	contentRaw, err := readProviderResponse(resp.Body)
 	if err != nil {
 		return err
 	}
 	eTagHeader := resp.Header.Get("Etag")
+	newEtag := s.lastEtag
 	if eTagHeader != "" {
-		s.infoMu.Lock()
-		s.lastEtag = eTagHeader
-		s.infoMu.Unlock()
+		newEtag = eTagHeader
 	}
 	content, _ := parser.DecodeBase64URLSafe(string(contentRaw))
 	if !hasInfo {
@@ -302,10 +308,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 		return err
 	}
 	s.UpdateGroups()
-	s.infoMu.Lock()
-	s.subscriptionInfo = info
-	s.lastUpdated = time.Now()
-	s.infoMu.Unlock()
+	now := time.Now()
 	if s.path != "" || s.cacheFile != nil {
 		content, _ := json.Marshal(option.Options{
 			Outbounds: s.lastOutOpts,
@@ -320,8 +323,8 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 		}
 		if s.cacheFile != nil {
 			saveSub := &adapter.SavedBinary{
-				LastUpdated: s.lastUpdated,
-				LastEtag:    s.lastEtag,
+				LastUpdated: now,
+				LastEtag:    newEtag,
 			}
 			if s.path != "" {
 				saveSub.Hash = s.hash
@@ -333,6 +336,11 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 			}
 		}
 	}
+	s.infoMu.Lock()
+	s.subscriptionInfo = info
+	s.lastUpdated = now
+	s.lastEtag = newEtag
+	s.infoMu.Unlock()
 	s.logger.Info("updated outbound provider ", s.Tag())
 	return nil
 }
@@ -412,6 +420,24 @@ func (s *ProviderRemote) loadFromContent(contentRaw []byte) error {
 	s.UpdateEndpoints(s.lastEPOpts, endpointOpts)
 	s.lastEPOpts = endpointOpts
 	return nil
+}
+
+func readProviderResponse(reader io.Reader) ([]byte, error) {
+	return readProviderResponseLimited(reader, providerMaxResponseBytes)
+}
+
+func readProviderResponseLimited(reader io.Reader, maxBytes int64) ([]byte, error) {
+	content, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) == 0 {
+		return nil, E.New("empty response body")
+	}
+	if int64(len(content)) > maxBytes {
+		return nil, E.New("response body exceeds size limit ", maxBytes, " bytes")
+	}
+	return content, nil
 }
 
 func pathExists(ctx context.Context, path string) (bool, error) {
