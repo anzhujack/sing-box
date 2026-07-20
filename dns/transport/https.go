@@ -211,9 +211,7 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 	var body io.Reader
 	switch t.method {
 	case http.MethodGet:
-		query := url.Values{}
-		query.Set("dns", base64.RawURLEncoding.EncodeToString(rawMessage))
-		destination.RawQuery = query.Encode()
+		destination = dohGetDestination(destination, rawMessage)
 	case http.MethodPost:
 		body = bytes.NewReader(rawMessage)
 	}
@@ -259,4 +257,11 @@ func (t *HTTPSTransport) exchange(ctx context.Context, message *mDNS.Msg) (*mDNS
 		return nil, err
 	}
 	return &responseMessage, nil
+}
+
+func dohGetDestination(destination url.URL, rawMessage []byte) url.URL {
+	query := destination.Query()
+	query.Set("dns", base64.RawURLEncoding.EncodeToString(rawMessage))
+	destination.RawQuery = query.Encode()
+	return destination
 }
