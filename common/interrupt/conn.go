@@ -7,34 +7,16 @@ import (
 	"github.com/sagernet/sing/common/bufio"
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
-	"github.com/sagernet/sing/common/x/list"
 )
-
-/*type GroupedConn interface {
-	MarkAsInternal()
-}
-
-func MarkAsInternal(conn any) {
-	if groupedConn, isGroupConn := common.Cast[GroupedConn](conn); isGroupConn {
-		groupedConn.MarkAsInternal()
-	}
-}*/
 
 type Conn struct {
 	net.Conn
-	group   *Group
-	element *list.Element[*groupConnItem]
+	group *Group
+	item  *groupConnItem
 }
 
-/*func (c *Conn) MarkAsInternal() {
-	c.element.Value.internal = true
-}*/
-
 func (c *Conn) Close() error {
-	c.group.access.Lock()
-	defer c.group.access.Unlock()
-	c.group.connections.Remove(c.element)
-	return c.Conn.Close()
+	return c.group.close(c.item)
 }
 
 func (c *Conn) ReaderReplaceable() bool {
@@ -51,13 +33,9 @@ func (c *Conn) Upstream() any {
 
 type PacketConn struct {
 	net.PacketConn
-	group   *Group
-	element *list.Element[*groupConnItem]
+	group *Group
+	item  *groupConnItem
 }
-
-/*func (c *PacketConn) MarkAsInternal() {
-	c.element.Value.internal = true
-}*/
 
 func (c *PacketConn) ReadPacket(buffer *buf.Buffer) (M.Socksaddr, error) {
 	if packetReader, ok := c.PacketConn.(N.PacketReader); ok {
@@ -78,12 +56,8 @@ func (c *PacketConn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) er
 	_, err := c.PacketConn.WriteTo(buffer.Bytes(), destination.UDPAddr())
 	return err
 }
-
 func (c *PacketConn) Close() error {
-	c.group.access.Lock()
-	defer c.group.access.Unlock()
-	c.group.connections.Remove(c.element)
-	return c.PacketConn.Close()
+	return c.group.close(c.item)
 }
 
 func (c *PacketConn) ReaderReplaceable() bool {
