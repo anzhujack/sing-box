@@ -36,6 +36,9 @@ func (r *Router) hijackDNSPacket(ctx context.Context, conn N.PacketConn, packetB
 	err := dnsOutbound.NewDNSPacketConnection(ctx, r.dns, conn, packetBuffers, metadata)
 	N.CloseOnHandshakeFailure(conn, onClose, err)
 	if err != nil && !E.IsClosedOrCanceled(err) {
+		if isTransientUnreachable(err) && r.network != nil {
+			r.network.HintUnreachable()
+		}
 		return E.Cause(err, "process DNS packet")
 	}
 	return nil
@@ -58,6 +61,9 @@ func (r *Router) HijackDNSPacket(ctx context.Context, payload []byte, writer N.P
 			return
 		}
 		if isTransientUnreachable(exchangeErr) {
+			if r.network != nil {
+				r.network.HintUnreachable()
+			}
 			if transientDNSLogThrottle.allow() {
 				r.logger.DebugContext(ctx, E.Cause(exchangeErr, "process DNS packet during network transition"))
 			}

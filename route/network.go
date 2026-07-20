@@ -499,6 +499,15 @@ func (r *NetworkManager) ResetNetwork() {
 	r.router.ResetNetwork()
 }
 
+func (r *NetworkManager) HintUnreachable() {
+	if r.interfaceMonitor == nil {
+		return
+	}
+	if forceUpdater, loaded := r.interfaceMonitor.(interface{ ForceUpdate() }); loaded {
+		forceUpdater.ForceUpdate()
+	}
+}
+
 func (r *NetworkManager) notifyInterfaceUpdate(defaultInterface *control.Interface, flags int) {
 	if defaultInterface == nil {
 		r.pauseManager.NetworkPause()
