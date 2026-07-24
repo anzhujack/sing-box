@@ -478,8 +478,8 @@ func initialProviderUpdateDelay(lastUpdated time.Time, updateInterval time.Durat
 		return providerInitialRetryInterval
 	}
 	wait := lastUpdated.Add(updateInterval).Sub(now)
-	if wait < 0 {
-		return 0
+	if wait <= 0 {
+		return time.Nanosecond
 	}
 	return wait
 }

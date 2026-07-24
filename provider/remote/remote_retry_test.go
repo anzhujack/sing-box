@@ -18,9 +18,29 @@ func TestProviderUpdateDelays(t *testing.T) {
 
 	require.Equal(t, providerInitialRetryInterval, initialProviderUpdateDelay(time.Time{}, updateInterval, now))
 	require.Equal(t, 30*time.Minute, initialProviderUpdateDelay(now.Add(-30*time.Minute), updateInterval, now))
-	require.Zero(t, initialProviderUpdateDelay(now.Add(-2*time.Hour), updateInterval, now))
+	require.Equal(t, time.Nanosecond, initialProviderUpdateDelay(now.Add(-2*time.Hour), updateInterval, now))
 	require.Equal(t, providerInitialRetryInterval, providerRetryDelay(time.Time{}, updateInterval))
 	require.Equal(t, updateInterval, providerRetryDelay(now, updateInterval))
+}
+
+func TestOverdueProviderUpdateDelayIsTickerSafe(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	for _, testCase := range []struct {
+		name        string
+		lastUpdated time.Time
+	}{
+		{name: "due now", lastUpdated: now.Add(-time.Hour)},
+		{name: "overdue", lastUpdated: now.Add(-2 * time.Hour)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ticker := time.NewTicker(time.Hour)
+			defer ticker.Stop()
+
+			require.NotPanics(t, func() {
+				ticker.Reset(initialProviderUpdateDelay(testCase.lastUpdated, time.Hour, now))
+			})
+		})
+	}
 }
 
 func TestReadProviderResponseLimits(t *testing.T) {
