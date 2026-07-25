@@ -34,6 +34,8 @@ import (
 )
 
 const (
+	// Startup retries intentionally continue until the first successful representation,
+	// but each attempt and retry cadence are bounded to avoid a tight failure loop.
 	providerInitialRetryInterval = 60 * time.Second
 	providerFetchTimeout         = 60 * time.Second
 	providerMaxResponseBytes     = 50 * 1024 * 1024
@@ -45,26 +47,41 @@ func RegisterProvider(registry *provider.Registry) {
 
 var _ adapter.Provider = (*ProviderRemote)(nil)
 
+type providerTicker interface {
+	C() <-chan time.Time
+	Reset(duration time.Duration)
+	Stop()
+}
+
+type systemProviderTicker struct {
+	*time.Ticker
+}
+
+func (t *systemProviderTicker) C() <-chan time.Time {
+	return t.Ticker.C
+}
+
 type ProviderRemote struct {
 	provider.Adapter
-	ctx              context.Context
-	cancel           context.CancelFunc
-	logger           log.ContextLogger
-	outbound         adapter.OutboundManager
-	provider         adapter.ProviderManager
-	cacheFile        adapter.CacheFile
-	httpClient       *http.Client
-	hash             hash.HashType
-	infoMu           sync.RWMutex
-	lastEtag         string
-	lastOutOpts      []option.Outbound
-	lastEPOpts       []option.Endpoint
-	lastUpdated      time.Time
-	subscriptionInfo adapter.SubscriptionInfo
-	ticker           *time.Ticker
-	tickerMu         sync.Mutex
-	tickerClosed     bool
-	updating         atomic.Bool
+	ctx               context.Context
+	cancel            context.CancelFunc
+	logger            log.ContextLogger
+	outbound          adapter.OutboundManager
+	provider          adapter.ProviderManager
+	cacheFile         adapter.CacheFile
+	httpClient        *http.Client
+	hash              hash.HashType
+	infoMu            sync.RWMutex
+	lastEtag          string
+	lastOutOpts       []option.Outbound
+	lastEPOpts        []option.Endpoint
+	lastUpdated       time.Time
+	hasRepresentation bool
+	subscriptionInfo  adapter.SubscriptionInfo
+	ticker            providerTicker
+	tickerMu          sync.Mutex
+	tickerClosed      bool
+	updating          atomic.Bool
 
 	httpClientOptions *option.HTTPClientOptions
 	downloadDetour    string
@@ -159,7 +176,7 @@ func (s *ProviderRemote) StartContext(ctx context.Context, startContext *adapter
 			s.logger.Warn("initial outbound provider ", s.Tag(), " fetch failed: ", err, " — starting empty and retrying in ", providerInitialRetryInterval)
 		}
 	}
-	ticker := time.NewTicker(initialProviderUpdateDelay(s.UpdatedAt(), s.updateInterval, time.Now()))
+	ticker := &systemProviderTicker{Ticker: time.NewTicker(initialProviderUpdateDelay(s.UpdatedAt(), s.updateInterval, time.Now()))}
 	s.tickerMu.Lock()
 	if s.tickerClosed {
 		s.tickerMu.Unlock()
@@ -183,6 +200,12 @@ func (s *ProviderRemote) UpdatedAt() time.Time {
 	s.infoMu.RLock()
 	defer s.infoMu.RUnlock()
 	return s.lastUpdated
+}
+
+func (s *ProviderRemote) hasLocalRepresentation() bool {
+	s.infoMu.RLock()
+	defer s.infoMu.RUnlock()
+	return s.hasRepresentation
 }
 
 func (s *ProviderRemote) SubscriptionInfo() adapter.SubscriptionInfo {
@@ -262,7 +285,7 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
-		if s.UpdatedAt().IsZero() {
+		if !s.hasLocalRepresentation() {
 			return E.New("received 304 without cached provider")
 		}
 		now := time.Now()
@@ -322,6 +345,9 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 		return err
 	}
 	s.UpdateGroups()
+	s.infoMu.Lock()
+	s.hasRepresentation = true
+	s.infoMu.Unlock()
 	now := time.Now()
 	if s.path != "" || s.cacheFile != nil {
 		content, _ := json.Marshal(option.Options{
@@ -414,7 +440,10 @@ func (s *ProviderRemote) loadCacheFile() error {
 		return err
 	}
 	s.UpdateGroups()
+	s.infoMu.Lock()
 	s.lastUpdated, s.lastEtag = lastUpdated, lastEtag
+	s.hasRepresentation = true
+	s.infoMu.Unlock()
 	return nil
 }
 
@@ -468,13 +497,13 @@ func pathExists(ctx context.Context, path string) (bool, error) {
 	return false, err
 }
 
-func (s *ProviderRemote) loopUpdate(ticker *time.Ticker) {
+func (s *ProviderRemote) loopUpdate(ticker providerTicker) {
 	for {
 		runtime.GC()
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticker.C():
 			s.updateOnce()
 			s.resetTicker(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
 		}
