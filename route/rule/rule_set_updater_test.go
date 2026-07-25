@@ -58,15 +58,22 @@ func TestRuleSetUpdaterCloseCancelsInFlightFetch(t *testing.T) {
 	ruleCtx, ruleCancel := context.WithCancel(context.Background())
 	requestStarted := make(chan struct{})
 	requestCanceled := make(chan struct{})
+	releaseResponse := make(chan struct{})
 	ruleSet := updaterTestRuleSet(ruleCtx, ruleCancel, time.Hour, roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		close(requestStarted)
 		<-request.Context().Done()
 		close(requestCanceled)
+		<-releaseResponse
 		return nil, request.Context().Err()
 	}))
 	updater := NewRuleSetUpdater(context.Background(), []adapter.RuleSet{ruleSet})
 	require.NotNil(t, updater)
 	t.Cleanup(func() {
+		select {
+		case <-releaseResponse:
+		default:
+			close(releaseResponse)
+		}
 		_ = updater.Close()
 		ruleCancel()
 	})
@@ -77,11 +84,24 @@ func TestRuleSetUpdaterCloseCancelsInFlightFetch(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("rule-set fetch did not start")
 	}
-	require.NoError(t, updater.Close())
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- updater.Close() }()
 	select {
 	case <-requestCanceled:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("RuleSetUpdater.Close did not cancel its in-flight fetch")
+	}
+	select {
+	case err := <-closeDone:
+		t.Fatalf("RuleSetUpdater.Close returned before its fetch exited: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseResponse)
+	select {
+	case err := <-closeDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("RuleSetUpdater.Close did not wait for loop shutdown")
 	}
 }
 

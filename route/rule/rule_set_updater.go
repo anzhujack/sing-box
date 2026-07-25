@@ -3,15 +3,20 @@ package rule
 import (
 	"context"
 	"runtime"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 )
 
 type RuleSetUpdater struct {
-	ctx      context.Context
-	cancel   context.CancelFunc
-	ruleSets []*RemoteRuleSet
+	ctx         context.Context
+	cancel      context.CancelFunc
+	ruleSets    []*RemoteRuleSet
+	lifecycleMu sync.Mutex
+	started     bool
+	closed      bool
+	done        chan struct{}
 }
 
 func NewRuleSetUpdater(ctx context.Context, ruleSets []adapter.RuleSet) *RuleSetUpdater {
@@ -30,15 +35,35 @@ func NewRuleSetUpdater(ctx context.Context, ruleSets []adapter.RuleSet) *RuleSet
 		ctx:      ctx,
 		cancel:   cancel,
 		ruleSets: remoteRuleSets,
+		done:     make(chan struct{}),
 	}
 }
 
 func (u *RuleSetUpdater) Start() {
-	go u.loopUpdate()
+	u.lifecycleMu.Lock()
+	defer u.lifecycleMu.Unlock()
+	if u.started || u.closed {
+		return
+	}
+	u.started = true
+	go func() {
+		defer close(u.done)
+		u.loopUpdate()
+	}()
 }
 
 func (u *RuleSetUpdater) Close() error {
-	u.cancel()
+	u.lifecycleMu.Lock()
+	if !u.closed {
+		u.closed = true
+		u.cancel()
+	}
+	started := u.started
+	done := u.done
+	u.lifecycleMu.Unlock()
+	if started {
+		<-done
+	}
 	return nil
 }
 
@@ -46,7 +71,7 @@ func (u *RuleSetUpdater) loopUpdate() {
 	now := time.Now()
 	nextUpdates := make([]time.Time, len(u.ruleSets))
 	for i, ruleSet := range u.ruleSets {
-		nextUpdates[i] = now.Add(initialRuleSetUpdateDelay(ruleSet.UpdatedTime(), ruleSet.updateInterval, now))
+		nextUpdates[i] = now.Add(ruleSet.initialUpdateDelay(now))
 	}
 	timer := time.NewTimer(waitUntilNext(nextUpdates))
 	defer timer.Stop()
@@ -55,10 +80,16 @@ func (u *RuleSetUpdater) loopUpdate() {
 		case <-u.ctx.Done():
 			return
 		case <-timer.C:
+			if u.ctx.Err() != nil {
+				return
+			}
 		}
 		now = time.Now()
 		var updated bool
 		for i, ruleSet := range u.ruleSets {
+			if u.ctx.Err() != nil {
+				return
+			}
 			if now.Before(nextUpdates[i]) {
 				continue
 			}
@@ -77,7 +108,13 @@ func (u *RuleSetUpdater) loopUpdate() {
 		if updated {
 			runtime.GC()
 		}
+		u.lifecycleMu.Lock()
+		if u.closed || u.ctx.Err() != nil {
+			u.lifecycleMu.Unlock()
+			return
+		}
 		timer.Reset(waitUntilNext(nextUpdates))
+		u.lifecycleMu.Unlock()
 	}
 }
 

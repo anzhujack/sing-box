@@ -95,6 +95,8 @@ func (s *abstractRuleSet) DecRef() {
 }
 
 func (s *abstractRuleSet) Cleanup() {
+	s.access.Lock()
+	defer s.access.Unlock()
 	if s.refs.Load() == 0 {
 		s.rules = nil
 	}

@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
@@ -33,19 +33,26 @@ const (
 
 var _ adapter.RuleSet = (*RemoteRuleSet)(nil)
 
+type ruleSetFetchAttempt struct {
+	done chan struct{}
+	err  error
+}
+
 type RemoteRuleSet struct {
 	abstractRuleSet
-	cancel         context.CancelFunc
-	outbound       adapter.OutboundManager
-	url            string
-	options        option.RemoteRuleSet
-	updateInterval time.Duration
-	httpClient     *http.Client
-	hash           hash.HashType
-	lastEtag       string
-	cacheFile      adapter.CacheFile
-	pauseManager   pause.Manager
-	updating       atomic.Bool
+	cancel               context.CancelFunc
+	outbound             adapter.OutboundManager
+	url                  string
+	options              option.RemoteRuleSet
+	updateInterval       time.Duration
+	initialRetryDeadline time.Time
+	httpClient           *http.Client
+	hash                 hash.HashType
+	lastEtag             string
+	cacheFile            adapter.CacheFile
+	pauseManager         pause.Manager
+	fetchMu              sync.Mutex
+	fetchAttempt         *ruleSetFetchAttempt
 }
 
 func NewRemoteRuleSet(ctx context.Context, logger logger.ContextLogger, tag string, options option.RuleSet) (*RemoteRuleSet, error) {
@@ -106,6 +113,40 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	return nil
 }
 
+func (s *RemoteRuleSet) recordFetchCompletion(err error, completedAt time.Time) {
+	s.access.Lock()
+	if err == nil {
+		s.initialRetryDeadline = time.Time{}
+	} else if s.lastUpdated.IsZero() {
+		s.initialRetryDeadline = completedAt.Add(ruleSetInitialRetryInterval)
+	}
+	s.access.Unlock()
+}
+
+func (s *RemoteRuleSet) getInitialRetryDeadline() time.Time {
+	s.access.RLock()
+	defer s.access.RUnlock()
+	return s.initialRetryDeadline
+}
+
+func (s *RemoteRuleSet) initialUpdateDelay(now time.Time) time.Duration {
+	s.access.RLock()
+	lastUpdated := s.lastUpdated
+	deadline := s.initialRetryDeadline
+	s.access.RUnlock()
+	if !lastUpdated.IsZero() {
+		return initialRuleSetUpdateDelay(lastUpdated, s.updateInterval, now)
+	}
+	if deadline.IsZero() {
+		return ruleSetInitialRetryInterval
+	}
+	wait := deadline.Sub(now)
+	if wait < 0 {
+		return 0
+	}
+	return wait
+}
+
 func (s *RemoteRuleSet) update(ctx context.Context) bool {
 	ctx = log.ContextWithNewID(ctx)
 	err := s.fetch(ctx, false)
@@ -113,9 +154,7 @@ func (s *RemoteRuleSet) update(ctx context.Context) bool {
 		s.logger.ErrorContext(ctx, "fetch rule-set ", s.tag, ": ", err)
 		return false
 	}
-	if s.refs.Load() == 0 {
-		s.rules = nil
-	}
+	s.Cleanup()
 	return true
 }
 
@@ -123,17 +162,39 @@ func (s *RemoteRuleSet) Update(ctx context.Context) error {
 	err := s.fetch(log.ContextWithNewID(ctx), false)
 	if err != nil {
 		return err
-	} else if s.refs.Load() == 0 {
-		s.rules = nil
+	} else {
+		s.Cleanup()
 	}
 	return nil
 }
 
 func (s *RemoteRuleSet) fetch(ctx context.Context, isStart bool) error {
-	if s.updating.Swap(true) {
-		return E.New("rule-set is updating")
+	s.fetchMu.Lock()
+	if attempt := s.fetchAttempt; attempt != nil {
+		s.fetchMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-attempt.done:
+			return attempt.err
+		}
 	}
-	defer s.updating.Store(false)
+	attempt := &ruleSetFetchAttempt{done: make(chan struct{})}
+	s.fetchAttempt = attempt
+	s.fetchMu.Unlock()
+
+	err := s.fetchOnce(ctx, isStart)
+	completedAt := time.Now()
+	s.fetchMu.Lock()
+	s.recordFetchCompletion(err, completedAt)
+	attempt.err = err
+	s.fetchAttempt = nil
+	close(attempt.done)
+	s.fetchMu.Unlock()
+	return err
+}
+
+func (s *RemoteRuleSet) fetchOnce(ctx context.Context, isStart bool) error {
 	s.logger.DebugContext(ctx, "updating rule-set ", s.tag, " from URL: ", s.url)
 	requestCtx, cancel := context.WithTimeout(ctx, ruleSetFetchTimeout)
 	defer cancel()
