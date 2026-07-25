@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/logger"
+	"github.com/sagernet/sing/service"
 
 	"github.com/stretchr/testify/require"
 )
@@ -92,4 +94,57 @@ func TestAbstractRuleSetMetadataConcurrentAccess(t *testing.T) {
 		ruleSet.UpdatedTime()
 	}
 	<-writerDone
+}
+
+type restoreFailureCache struct {
+	adapter.CacheFile
+	saved     *adapter.SavedBinary
+	saveCount int
+}
+
+func (c *restoreFailureCache) LoadRuleSet(string) *adapter.SavedBinary { return c.saved }
+func (c *restoreFailureCache) SaveRuleSet(_ string, _ *adapter.SavedBinary) error {
+	c.saveCount++
+	return nil
+}
+
+type restoreFailureTransport struct{ roundTripFunc }
+
+func (*restoreFailureTransport) CloseIdleConnections() {}
+func (*restoreFailureTransport) Reset()                {}
+
+type restoreFailureHTTPClientManager struct {
+	adapter.HTTPClientManager
+	transport adapter.HTTPTransport
+}
+
+func (m *restoreFailureHTTPClientManager) DefaultTransport() adapter.HTTPTransport {
+	return m.transport
+}
+
+func TestRemoteRuleSetRestoreFailureDoesNotPersistentlyEvictCache(t *testing.T) {
+	cache := &restoreFailureCache{saved: &adapter.SavedBinary{Content: []byte("invalid cached rule-set")}}
+	transport := &restoreFailureTransport{roundTripFunc: func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusInternalServerError,
+			Status:     http.StatusText(http.StatusInternalServerError),
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    request,
+		}, nil
+	}}
+	ctx := service.ContextWith[adapter.CacheFile](context.Background(), cache)
+	ctx = service.ContextWith[adapter.HTTPClientManager](ctx, &restoreFailureHTTPClientManager{transport: transport})
+	ruleSet, err := NewRemoteRuleSet(ctx, logger.NOP(), "remote", option.RuleSet{
+		Type:   constant.RuleSetTypeRemote,
+		Format: constant.RuleSetFormatSource,
+		RemoteOptions: option.RemoteRuleSet{
+			URL: "https://example.com/rules.json",
+		},
+	})
+	require.NoError(t, err)
+	startContext := adapter.NewHTTPStartContext()
+	t.Cleanup(startContext.Close)
+	require.NoError(t, ruleSet.StartContext(ctx, startContext))
+	require.Zero(t, cache.saveCount, "a failed restore must not destroy persisted metadata before a replacement succeeds")
 }

@@ -92,15 +92,10 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	startContext.Register(transport)
 	s.httpClient = &http.Client{Transport: transport}
 	if err = s.loadCacheFile(); err != nil {
-		s.logger.Warn(E.Cause(err, "restore cached rule-set, discarding stale cache and refetching"))
+		s.logger.Warn(E.Cause(err, "restore cached rule-set, ignoring cache for this run and refetching"))
 		s.hash = hash.HashType{}
 		s.lastEtag = ""
-		s.lastUpdated = time.Time{}
-		if s.cacheFile != nil {
-			if saveErr := s.cacheFile.SaveRuleSet(s.tag, &adapter.SavedBinary{}); saveErr != nil {
-				s.logger.Debug("evict stale rule-set cache ", s.tag, ": ", saveErr)
-			}
-		}
+		s.setUpdatedTime(time.Time{})
 	}
 	if s.UpdatedTime().IsZero() {
 		err = s.fetch(ctx, true)
@@ -111,8 +106,8 @@ func (s *RemoteRuleSet) StartContext(ctx context.Context, startContext *adapter.
 	return nil
 }
 
-func (s *RemoteRuleSet) update() bool {
-	ctx := log.ContextWithNewID(s.ctx)
+func (s *RemoteRuleSet) update(ctx context.Context) bool {
+	ctx = log.ContextWithNewID(ctx)
 	err := s.fetch(ctx, false)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "fetch rule-set ", s.tag, ": ", err)
