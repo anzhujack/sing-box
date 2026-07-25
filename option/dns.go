@@ -82,11 +82,17 @@ func (o PrefetchDNSOptions) MarshalJSON() ([]byte, error) {
 }
 
 func (o *PrefetchDNSOptions) UnmarshalJSON(bytes []byte) error {
-	err := json.Unmarshal(bytes, &o.Enabled)
-	if err == nil {
+	var enabled bool
+	if err := json.Unmarshal(bytes, &enabled); err == nil {
+		*o = PrefetchDNSOptions{Enabled: enabled}
 		return nil
 	}
-	return json.UnmarshalDisallowUnknownFields(bytes, (*_PrefetchDNSOptions)(o))
+	var decoded _PrefetchDNSOptions
+	if err := json.UnmarshalDisallowUnknownFields(bytes, &decoded); err != nil {
+		return err
+	}
+	*o = PrefetchDNSOptions(decoded)
+	return nil
 }
 
 type _OptimisticDNSOptions struct {

@@ -29,13 +29,17 @@ func TestClientRecordsEachSyncAndAsyncExchangeOnce(t *testing.T) {
 	require.NotNil(t, response)
 
 	client.ClearCache()
-	callbackDone := make(chan struct{})
+	type asyncResult struct {
+		response *mDNS.Msg
+		err      error
+	}
+	callbackResult := make(chan asyncResult, 1)
 	client.ExchangeAsync(context.Background(), transport, newStatsQuery(), adapter.DNSQueryOptions{}, nil, func(response *mDNS.Msg, err error) {
-		require.NoError(t, err)
-		require.NotNil(t, response)
-		close(callbackDone)
+		callbackResult <- asyncResult{response: response, err: err}
 	})
-	<-callbackDone
+	result := <-callbackResult
+	require.NoError(t, result.err)
+	require.NotNil(t, result.response)
 
 	require.Equal(t, 3, recorder.Count())
 	require.Equal(t, 2, transport.Count())

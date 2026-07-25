@@ -52,3 +52,22 @@ func TestDNSServerOptionsRejectsLegacyFormats(t *testing.T) {
 		require.EqualError(t, err, legacyDNSServerRemovedMessage)
 	}
 }
+
+func TestPrefetchDNSOptionsRepeatedUnmarshalResetsTuning(t *testing.T) {
+	var options PrefetchDNSOptions
+	require.NoError(t, json.Unmarshal([]byte(`{
+		"enabled": true,
+		"metadata_size": 128,
+		"qps": 16,
+		"backoff_multiplier": 2
+	}`), &options))
+	require.Equal(t, uint32(128), options.MetadataSize)
+	require.Equal(t, uint32(16), options.QPS)
+	require.Equal(t, 2.0, options.BackoffMultiplier)
+
+	require.NoError(t, json.Unmarshal([]byte(`false`), &options))
+	require.False(t, options.Enabled)
+	require.Zero(t, options.MetadataSize)
+	require.Zero(t, options.QPS)
+	require.Zero(t, options.BackoffMultiplier)
+}
