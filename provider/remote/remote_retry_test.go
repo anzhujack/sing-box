@@ -96,11 +96,63 @@ func TestFetchClosesResponseBodyOnNonContentResponses(t *testing.T) {
 			}
 			err := provider.fetch(context.Background(), true)
 			if statusCode == http.StatusNotModified {
-				require.NoError(t, err)
+				require.ErrorContains(t, err, "without cached provider")
 			} else {
 				require.Error(t, err)
 			}
 			require.True(t, body.closed)
 		})
+	}
+}
+
+func TestProviderUpdateDoesNotRestartTickerAfterClose(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	requestStarted := make(chan struct{})
+	releaseRequest := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseRequest:
+		default:
+			close(releaseRequest)
+		}
+	})
+
+	const updateInterval = 20 * time.Millisecond
+	provider := &ProviderRemote{
+		ctx:            ctx,
+		cancel:         cancel,
+		logger:         log.NewNOPFactory().NewLogger("provider"),
+		url:            "https://provider.example/subscription",
+		updateInterval: updateInterval,
+		lastUpdated:    time.Now(),
+		ticker:         time.NewTicker(time.Hour),
+		httpClient: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			close(requestStarted)
+			<-releaseRequest
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Status:     http.StatusText(http.StatusInternalServerError),
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    request,
+			}, nil
+		})},
+	}
+
+	updateDone := make(chan error, 1)
+	go func() { updateDone <- provider.Update() }()
+	select {
+	case <-requestStarted:
+	case <-time.After(time.Second):
+		t.Fatal("provider update did not start")
+	}
+	require.NoError(t, provider.Close())
+	close(releaseRequest)
+	require.Error(t, <-updateDone)
+
+	select {
+	case <-provider.ticker.C:
+		t.Fatal("provider update restarted ticker after Close")
+	case <-time.After(3 * updateInterval):
 	}
 }

@@ -62,6 +62,8 @@ type ProviderRemote struct {
 	lastUpdated      time.Time
 	subscriptionInfo adapter.SubscriptionInfo
 	ticker           *time.Ticker
+	tickerMu         sync.Mutex
+	tickerClosed     bool
 	updating         atomic.Bool
 
 	httpClientOptions *option.HTTPClientOptions
@@ -157,17 +159,23 @@ func (s *ProviderRemote) StartContext(ctx context.Context, startContext *adapter
 			s.logger.Warn("initial outbound provider ", s.Tag(), " fetch failed: ", err, " — starting empty and retrying in ", providerInitialRetryInterval)
 		}
 	}
-	s.ticker = time.NewTicker(s.updateInterval)
-	go s.loopUpdate()
+	ticker := time.NewTicker(initialProviderUpdateDelay(s.UpdatedAt(), s.updateInterval, time.Now()))
+	s.tickerMu.Lock()
+	if s.tickerClosed {
+		s.tickerMu.Unlock()
+		ticker.Stop()
+		return s.Adapter.Start()
+	}
+	s.ticker = ticker
+	s.tickerMu.Unlock()
+	go s.loopUpdate(ticker)
 	return s.Adapter.Start()
 }
 
 func (s *ProviderRemote) Update() error {
 	ctx := interrupt.ContextWithIsProviderConnection(s.ctx)
 	err := s.fetch(ctx, false)
-	if s.ticker != nil {
-		s.ticker.Reset(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
-	}
+	s.resetTicker(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
 	return err
 }
 
@@ -185,9 +193,12 @@ func (s *ProviderRemote) SubscriptionInfo() adapter.SubscriptionInfo {
 
 func (s *ProviderRemote) Close() error {
 	s.cancel()
+	s.tickerMu.Lock()
+	s.tickerClosed = true
 	if s.ticker != nil {
 		s.ticker.Stop()
 	}
+	s.tickerMu.Unlock()
 	return common.Close(&s.Adapter)
 }
 
@@ -251,6 +262,9 @@ func (s *ProviderRemote) fetch(ctx context.Context, isStart bool) error {
 	switch resp.StatusCode {
 	case http.StatusOK:
 	case http.StatusNotModified:
+		if s.UpdatedAt().IsZero() {
+			return E.New("received 304 without cached provider")
+		}
 		now := time.Now()
 		if s.cacheFile != nil {
 			saveSub := s.cacheFile.LoadSubscription(s.Tag())
@@ -454,23 +468,26 @@ func pathExists(ctx context.Context, path string) (bool, error) {
 	return false, err
 }
 
-func (s *ProviderRemote) loopUpdate() {
-	s.ticker.Stop()
-	select {
-	case <-s.ticker.C:
-	default:
-	}
-	s.ticker.Reset(initialProviderUpdateDelay(s.UpdatedAt(), s.updateInterval, time.Now()))
+func (s *ProviderRemote) loopUpdate(ticker *time.Ticker) {
 	for {
 		runtime.GC()
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-s.ticker.C:
+		case <-ticker.C:
 			s.updateOnce()
-			s.ticker.Reset(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
+			s.resetTicker(providerRetryDelay(s.UpdatedAt(), s.updateInterval))
 		}
 	}
+}
+
+func (s *ProviderRemote) resetTicker(delay time.Duration) {
+	s.tickerMu.Lock()
+	defer s.tickerMu.Unlock()
+	if s.tickerClosed || s.ticker == nil {
+		return
+	}
+	s.ticker.Reset(delay)
 }
 
 func initialProviderUpdateDelay(lastUpdated time.Time, updateInterval time.Duration, now time.Time) time.Duration {
