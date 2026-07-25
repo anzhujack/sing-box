@@ -1,6 +1,7 @@
 package route
 
 import (
+	"sync/atomic"
 	"testing"
 
 	"github.com/sagernet/sing-tun"
@@ -9,11 +10,11 @@ import (
 
 type forceUpdateMonitor struct {
 	tun.DefaultInterfaceMonitor
-	calls int
+	calls atomic.Int32
 }
 
 func (m *forceUpdateMonitor) ForceUpdate() {
-	m.calls++
+	m.calls.Add(1)
 }
 
 func TestHintUnreachableForcesInterfaceRefresh(t *testing.T) {
@@ -23,5 +24,14 @@ func TestHintUnreachableForcesInterfaceRefresh(t *testing.T) {
 	monitor := &forceUpdateMonitor{}
 	manager.interfaceMonitor = monitor
 	manager.HintUnreachable()
-	require.Equal(t, 1, monitor.calls)
+	require.Equal(t, int32(1), monitor.calls.Load())
+}
+
+func TestHintUnreachableCoalescesBurst(t *testing.T) {
+	monitor := &forceUpdateMonitor{}
+	manager := &NetworkManager{interfaceMonitor: monitor}
+	for range 16 {
+		manager.HintUnreachable()
+	}
+	require.Equal(t, int32(1), monitor.calls.Load())
 }

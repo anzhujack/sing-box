@@ -33,6 +33,31 @@ func TestNetworkCloseCancelsPendingReset(t *testing.T) {
 	require.Zero(t, resetCount.Load())
 }
 
+func TestNetworkCloseWaitsForRunningReset(t *testing.T) {
+	manager := &NetworkManager{logger: log.NewNOPFactory().NewLogger("network")}
+	resetStarted := make(chan struct{})
+	releaseReset := make(chan struct{})
+	manager.scheduleResetAfter(func() {
+		close(resetStarted)
+		<-releaseReset
+	}, 0)
+
+	select {
+	case <-resetStarted:
+	case <-time.After(time.Second):
+		t.Fatal("scheduled reset did not start")
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close() }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned while a reset callback was still running: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseReset)
+	require.NoError(t, <-closeDone)
+}
+
 func TestAutoDetectInterfaceFallsBackToKernelDuringMonitorGap(t *testing.T) {
 	manager := &NetworkManager{
 		interfaceFinder:  control.NewDefaultInterfaceFinder(),

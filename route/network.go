@@ -60,6 +60,8 @@ type NetworkManager struct {
 	resetCoalesceTimer      *time.Timer
 	resetCoalesceGeneration uint64
 	resetCoalesceClosed     bool
+	resetCoalesceWG         sync.WaitGroup
+	unreachableHintNext     time.Time
 	started                 bool
 }
 
@@ -237,6 +239,7 @@ func (r *NetworkManager) Close() error {
 		r.resetCoalesceTimer = nil
 	}
 	r.resetCoalesceMu.Unlock()
+	r.resetCoalesceWG.Wait()
 
 	monitor := taskmonitor.New(r.logger, C.StopTimeout)
 	var err error
@@ -504,6 +507,16 @@ func (r *NetworkManager) HintUnreachable() {
 		return
 	}
 	if forceUpdater, loaded := r.interfaceMonitor.(interface{ ForceUpdate() }); loaded {
+		r.resetCoalesceMu.Lock()
+		now := time.Now()
+		if r.resetCoalesceClosed || now.Before(r.unreachableHintNext) {
+			r.resetCoalesceMu.Unlock()
+			return
+		}
+		r.unreachableHintNext = now.Add(resetCoalesceDelay)
+		r.resetCoalesceWG.Add(1)
+		r.resetCoalesceMu.Unlock()
+		defer r.resetCoalesceWG.Done()
 		forceUpdater.ForceUpdate()
 	}
 }
@@ -575,7 +588,9 @@ func (r *NetworkManager) scheduleResetAfter(reset func(), delay time.Duration) {
 			return
 		}
 		r.resetCoalesceTimer = nil
+		r.resetCoalesceWG.Add(1)
 		r.resetCoalesceMu.Unlock()
+		defer r.resetCoalesceWG.Done()
 		reset()
 	})
 	r.resetCoalesceMu.Unlock()
